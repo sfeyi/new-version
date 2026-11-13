@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#172923"><title>校园人像导拍</title><link rel="stylesheet" href="./static/style.css">
+  <script type="module" src="./static/camera.js"></script>
+</head>
+<body data-reference="empty">
+  <header><div class="brand"><span class="mark" aria-hidden="true"></span>校园人像导拍</div><span id="source-state">尚未取景</span></header>
+  <main>
+    <div id="offline" class="offline" hidden><span id="offline-status" role="status">正在检查离线文件</span><button id="offline-download" type="button">下载离线包</button></div>
+    <div class="top"><h1>跟拍参考照</h1><ol id="steps" aria-label="拍摄进度"><li>机位</li><li>站位</li><li>姿势</li><li>拍摄</li></ol></div>
+    <div class="workspace">
+      <section class="camera" aria-label="取景和拍摄">
+        <div id="viewport">
+          <div id="surface" hidden><video id="video" muted playsinline></video><img id="live-photo" hidden alt="当前试拍画面"><canvas id="overlay" aria-label="取景引导，可点选主角"></canvas></div>
+          <div id="empty"><span class="empty-frame" aria-hidden="true"></span><p>取景画面</p></div>
+          <img id="scene-thumb" hidden alt="参考地标与拍摄方向">
+          <div id="legend" hidden>
+            <span><i aria-hidden="true"></i><span id="target-label">目标</span></span>
+            <span id="current-key"><i aria-hidden="true"></i><span id="current-label">当前</span></span>
+          </div>
+        </div>
+        <div class="feedback"><div class="indicator" id="indicator"></div>
+          <div class="guidance-text" role="status"><div id="who">准备</div><h2 id="hint">请先打开已选好的参考照</h2></div>
+          <button id="skip-stage" type="button" hidden>跳过机位</button>
+          <progress id="hold" max="1" value="0" aria-label="稳定进度" hidden></progress>
+        </div>
+        <div class="controls">
+          <button id="camera" type="button">开启相机</button><button id="flip" type="button" hidden>切换镜头</button>
+          <button id="choose-live" type="button">用照片试拍</button><input id="live-file" type="file" accept="image/jpeg,image/png,image/webp" hidden>
+          <button id="restore-steps" type="button" hidden>恢复全部步骤</button>
+          <button id="shutter" class="shutter" type="button" disabled><span aria-hidden="true"></span>拍摄并保存</button>
+        </div>
+        <div id="export" class="export-photo" hidden><img id="last-shot" alt="刚拍摄的照片，可长按保存"><div><p>本次拍摄</p><button id="share-shot" type="button" hidden>保存到相册或分享</button> <a id="download-shot">下载 JPEG</a></div></div>
+      </section>
+      <aside>
+        <div class="ref-heading"><h2>参考照</h2><button id="choose-ref" type="button">打开照片</button></div>
+        <input id="ref-file" type="file" accept="image/jpeg,image/png,image/webp" hidden>
+        <div id="ref-box"><p id="ref-empty">载入一张校园人像</p><div id="ref-surface" hidden><img id="reference" alt="已选的参考人像"><canvas id="ref-overlay" aria-label="点选参考照中的主角"></canvas></div></div>
+        <div class="ref-details"><strong id="filename">尚未载入</strong><p id="viewpoint"></p><p id="subject-note">若画面中有多人，可以点选照片里的主角。</p><button type="button" id="mirror-ref" aria-pressed="false" hidden>水平翻转参考照</button></div>
+      </aside>
+    </div>
+  </main>
+</body>
+</html>
