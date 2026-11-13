@@ -47,13 +47,14 @@ function tap(params) {
 export async function openGuide(form, image, progress) {
   const file = form.get("reference");
   if (file.size > 24*1024*1024) throw new Error("请使用小于 24 MB 的参考照");
+  const frame = imagePixels(image);
   progress("正在准备手机离线包");
   await prepareOffline();
   if (!notes) notes = await (await fetch(new URL("../campus-viewpoints.json", import.meta.url))).json();
   const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", await file.arrayBuffer()));
   const key = Array.from(hash, byte => byte.toString(16).padStart(2,"0")).join("");
   const options = {mirror:form.get("mirror") === "1", tap:tap(form), viewpoint:notes[key] || ""};
-  return request("open", {sid:crypto.randomUUID(), ...imagePixels(image), options}, progress);
+  return request("open", {sid:crypto.randomUUID(), ...frame, options}, progress);
 }
 
 export async function analyzeFrame(sid, query, blob) {

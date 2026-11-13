@@ -6,6 +6,7 @@ import argparse
 import base64
 import functools
 import io
+import mimetypes
 import os
 import sys
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -33,10 +34,16 @@ class Site(SimpleHTTPRequestHandler):
         pass
 
 
+def upload(path):
+    return {"name": path.name, "mimeType": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+            "buffer": path.read_bytes()}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("photo", type=Path)
     parser.add_argument("--url")
+    parser.add_argument("--browser", choices=("chromium", "webkit"), default="chromium")
     parser.add_argument("--other", type=Path, help="An unrelated portrait to check background rejection offline")
     parser.add_argument("--tower", action="store_true", help="Expect a fixed building outline for this reference")
     options = parser.parse_args()
@@ -56,12 +63,14 @@ def main():
     data_url = "data:image/jpeg;base64," + base64.b64encode(source.getvalue()).decode()
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(executable_path=os.environ.get("CHROMIUM_PATH"))
+            engine = getattr(pw, options.browser)
+            browser = engine.launch(executable_path=os.environ.get("CHROMIUM_PATH") if options.browser == "chromium" else None)
             ctx = browser.new_context(viewport={"width":390, "height":844}, is_mobile=True, has_touch=True)
             errors, unexpected = [], []
             ctx.on("request", lambda req: unexpected.append(req.url) if "/api/" in req.url or
                    (req.url.startswith("http") and urlparse(url).netloc != urlparse(req.url).netloc) else None)
-            ctx.add_init_script(script="""Object.defineProperty(navigator.mediaDevices,'getUserMedia',{value:async()=>{
+            ctx.add_init_script(script="""if (navigator.mediaDevices && HTMLCanvasElement.prototype.captureStream)
+            Object.defineProperty(navigator.mediaDevices,'getUserMedia',{value:async()=>{
               const img = new Image();
               img.src = 'PHOTO_DATA';
               await img.decode();
@@ -85,7 +94,7 @@ def main():
             page.on("console", lambda msg: print("Browser:", msg.text, flush=True) if msg.type == "error" else None)
             page.goto(url, wait_until="domcontentloaded")
             expect(page.locator("#offline-status")).to_contain_text("已就绪")
-            page.locator("#ref-file").set_input_files(options.photo)
+            page.locator("#ref-file").set_input_files(upload(options.photo))
             try:
                 page.wait_for_function("document.body.dataset.reference === 'loaded' || /失败|无法|无效/.test(document.querySelector('#hint').textContent)", timeout=180000)
                 assert page.locator("body").get_attribute("data-reference") == "loaded", page.locator("#hint").inner_text()
@@ -93,25 +102,34 @@ def main():
                 print("Reference:", page.locator("#hint").inner_text(), flush=True)
                 raise
             print("Offline reference ready", flush=True)
-            page.locator("#camera").click()
+            camera = page.evaluate("!!(navigator.mediaDevices && HTMLCanvasElement.prototype.captureStream)")
+            if camera:
+                page.locator("#camera").click()
+            else:
+                assert options.browser == "webkit", "Missing camera replay support"
+                page.locator("#live-file").set_input_files(upload(options.photo))
+            expect(page.locator("#source-state")).to_have_text("相机取景" if camera else "照片试拍")
             if options.tower:
                 expect(page.locator("#legend")).to_have_attribute("data-background", "outline")
-            expect(page.locator("#source-state")).to_have_text("相机取景")
             expect(page.locator("#shutter")).to_be_enabled(timeout=150000)
             page.locator("#shutter").click()
             expect(page.locator("#export")).to_be_visible(timeout=60000)
             with page.expect_download() as event:
                 page.locator("#download-shot").click()
             with Image.open(event.value.path()) as output:
-                assert output.format == "JPEG" and output.size == photo.size
-            print("Offline camera guidance, all three gates and JPEG capture passed", flush=True)
+                assert output.format == "JPEG"
+                if camera:
+                    assert output.size == photo.size
+                else:
+                    assert abs((output.width / output.height) / (photo.width / photo.height) - 1) < .003
+            print("Offline", "camera" if camera else "photo", "guidance, all three gates and JPEG capture passed", flush=True)
             if options.other:
-                page.locator("#live-file").set_input_files(options.other)
+                page.locator("#live-file").set_input_files(upload(options.other))
                 expect(page.locator("#source-state")).to_have_text("照片试拍")
                 expect(page.locator("#indicator")).to_have_attribute("data-mode", "search", timeout=90000)
                 expect(page.locator("#shutter")).to_be_disabled()
                 print("Unrelated background rejected offline", flush=True)
-            page.locator("#live-file").set_input_files(options.photo)
+            page.locator("#live-file").set_input_files(upload(options.photo))
             expect(page.locator("#source-state")).to_have_text("照片试拍")
             expect(page.locator("#live-photo")).to_have_js_property("complete", True)
             for stage in ("机位", "站位", "姿势"):

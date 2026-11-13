@@ -10,7 +10,11 @@ async function service() {
     throw new Error("请在手机 Chrome 或 Safari 中通过 HTTPS 测试链接打开");
   }
   if (!registration) {
-    const reg = await navigator.serviceWorker.register(new URL("../sw.js", import.meta.url));
+    const script = new URL("../sw.js", import.meta.url);
+    const installed = await navigator.serviceWorker.getRegistration(new URL("../", import.meta.url));
+    // An installed app may be launched with no network available for a registration fetch.
+    const reg = installed?.active?.scriptURL === script.href ? installed : await navigator.serviceWorker.register(script);
+    if (reg === installed && navigator.onLine) reg.update().catch(() => {});
     const worker = reg.installing || reg.waiting;
     if (!reg.active && worker) {
       await new Promise((resolve, reject) => {
