@@ -1,5 +1,7 @@
 import {drawReference, drawGuide} from "./overlay.js";
 import {onDevice, openGuide, analyzeFrame, releaseGuide} from "./transport.js";
+import {FILTERS, filterSettings, filterCSS, applyPhotoFilter} from "./filters.js";
+import {FocusController, cropRect, cameraPoint} from "./focus.js";
 
 const el = id => document.getElementById(id);
 const video = el("video"), livePhoto = el("live-photo"), refPhoto = el("reference");
@@ -17,9 +19,95 @@ let lastAnalyzed = 0, lastVideoTime = -1, lastMessage = "";
 let cameraZoom = 1;
 let refMirrored = false, manualDirection = false, refTap = null;
 let mirrorFrames = 0, autoFlippedSource = -1;
+let photoFilter = filterSettings(), pointFocus = false, focusMarkerTimer;
+const focus = new FocusController();
+
+function updateFilter() {
+  photoFilter = filterSettings(el("photo-filter").value, Number(el("filter-strength").value)/100);
+  video.style.filter = livePhoto.style.filter = filterCSS(photoFilter);
+  el("filter-strength").disabled = photoFilter.id === "none";
+  el("filter-strength-value").textContent = Math.round(photoFilter.strength*100)+"%";
+  el("filter-summary").textContent = FILTERS[photoFilter.id].name+
+    (photoFilter.id === "none" ? "" : " · "+Math.round(photoFilter.strength*100)+"%");
+}
+el("photo-filter").onchange = updateFilter;
+el("filter-strength").oninput = updateFilter;
+
+function focusControls(message) {
+  const camera = source === "camera";
+  el("focus-auto").disabled = !camera || !focus.autoMode || focus.busy || focus.blocked;
+  el("focus-point").disabled = !camera || !focus.canPoint || focus.busy || focus.blocked;
+  el("focus-point").setAttribute("aria-pressed", String(pointFocus));
+  el("overlay").setAttribute("aria-label", pointFocus ? "取景引导，可点按对焦" : "取景引导，可点选主角");
+  el("focus-manual-row").hidden = !camera || !focus.distance;
+  el("focus-distance").disabled = !camera || !focus.distance || focus.busy || focus.blocked;
+  if (message) el("focus-status").textContent = message;
+}
+
+function resetFocus(track = null) {
+  let supported = {};
+  try {supported = navigator.mediaDevices?.getSupportedConstraints?.() || {};} catch {}
+  focus.bind(track,supported);
+  pointFocus = false;
+  clearTimeout(focusMarkerTimer);
+  el("focus-marker").hidden = true;
+  const distance = focus.settings.focusDistance;
+  const amount = focus.distance && Number.isFinite(distance)
+    ? Math.max(0,Math.min(100,100*(distance-focus.distance.min)/(focus.distance.max-focus.distance.min))) : 50;
+  el("focus-distance").value = Math.round(amount);
+  el("focus-distance-value").textContent = Math.round(amount)+"%";
+  focusControls(!track ? "开启相机后检测对焦功能。" : focus.autoMode || focus.distance
+    ? "可使用下方控件调焦；点按对焦开启后，点击取景画面选择位置。"
+    : "当前镜头或浏览器未开放网页对焦控制，保持设备默认对焦。仍可点选主角。");
+  if (track && !focus.canPoint && (focus.autoMode || focus.distance)) {
+    focusControls("可使用已启用的控件调焦；当前设备未开放点按对焦。点击画面仍可点选主角。");
+  }
+}
+
+async function changeFocus(operation, label) {
+  if (focus.busy || source !== "camera") return;
+  const revision = focus.revision;
+  invalidate(shownStage, pendingTap);
+  const pending = operation();
+  focusControls("正在请求"+label+"…");
+  const result = await pending;
+  if (revision !== focus.revision || result.status === "stale") return;
+  if (result.status === "timeout") pointFocus = false;
+  ++sourceVersion;
+  invalidate(shownStage, pendingTap);
+  const messages = {
+    requested:"已请求"+label+"，请观察画面是否清晰。",
+    unconfirmed:"设备未确认此对焦设置，请观察画面；可尝试自动对焦。",
+    failed:"本次调焦未能应用，请重试或切换自动对焦。",
+    unavailable:"当前设备不支持此对焦方式，保持设备默认对焦。",
+    timeout:"对焦请求超时；请关闭后重新开启相机，再尝试调焦。",
+  };
+  focusControls(messages[result.status] || "请稍后重试调焦。");
+  el("focus-marker").dataset.state = result.status;
+}
+
+el("focus-auto").onclick = () => {
+  pointFocus = false;
+  el("focus-marker").hidden = true;
+  changeFocus(() => focus.auto(), "自动对焦");
+};
+el("focus-point").onclick = () => {
+  pointFocus = !pointFocus;
+  el("focus-marker").hidden = true;
+  focusControls(pointFocus ? "点按取景画面请求对焦；关闭此开关后恢复点选主角。" : "已恢复点选主角。");
+};
+el("focus-distance").oninput = () => {
+  el("focus-distance-value").textContent = el("focus-distance").value+"%";
+};
+el("focus-distance").onchange = () => {
+  pointFocus = false;
+  el("focus-marker").hidden = true;
+  changeFocus(() => focus.manual(Number(el("focus-distance").value)/100), "手动调焦");
+};
 
 function setCameraZoom(value) {
   cameraZoom = value;
+  el("focus-marker").hidden = true;
   video.style.transform = livePhoto.style.transform = "scale(" + value + ")";
   const name = {camera:"相机取景", photo:"照片试拍"}[source] || "尚未取景";
   el("source-state").textContent = value === 1 ? name : name + " · " + value.toFixed(2) + "×";
@@ -83,7 +171,7 @@ function display(result, pendingStage) {
   });
   el("hold").hidden = !result || result.mode !== "hold";
   el("hold").value = result?.hold || 0;
-  el("shutter").disabled = !result?.ready || !!shotRequested;
+  el("shutter").disabled = !result?.ready || !!shotRequested || focus.busy;
   const skipButton = el("skip-stage");
   skipButton.hidden = index < 0 || shownStage === "ready";
   if (!skipButton.hidden) skipButton.textContent = "跳过" + stageNames[index];
@@ -258,6 +346,21 @@ el("ref-overlay").onclick = e => {
   if (referenceFile) loadReference(referenceFile, positionIn(e));
 };
 el("overlay").onclick = e => {
+  if (source === "camera" && pointFocus) {
+    if (focus.busy) return;
+    const point = positionIn(e);
+    const rect = surface.getBoundingClientRect();
+    const target = cameraPoint(point, video.videoWidth, video.videoHeight, rect.width/rect.height, cameraZoom);
+    const marker = el("focus-marker");
+    marker.style.left = point[0]*100+"%";
+    marker.style.top = point[1]*100+"%";
+    marker.dataset.state = "requesting";
+    marker.hidden = false;
+    clearTimeout(focusMarkerTimer);
+    focusMarkerTimer = setTimeout(() => {marker.hidden = true;}, 2500);
+    changeFocus(() => focus.point(target), "点按对焦");
+    return;
+  }
   if (!session || !source) return;
   invalidate();
   pendingTap = positionIn(e);
@@ -265,6 +368,7 @@ el("overlay").onclick = e => {
 };
 
 function stopTracks() {
+  resetFocus();
   if (stream) for (const track of stream.getTracks()) track.stop();
   stream = null;
   video.srcObject = null;
@@ -280,6 +384,7 @@ function showSource(kind) {
   livePhoto.hidden = kind !== "photo";
   el("camera").textContent = kind === "camera" ? "关闭相机" : "开启相机";
   el("flip").hidden = kind !== "camera";
+  focusControls(kind === "photo" ? "照片试拍可使用滤镜；对焦仅用于实时相机。" : undefined);
   layout();
   promptForInput();
 }
@@ -308,6 +413,7 @@ async function startCamera() {
       stopTracks(); showSource(null); tell("相机", "相机已断开，可以重新开启", "search");
     };
     showSource("camera");
+    resetFocus(track);
   } catch (error) {
     if (version !== sourceVersion) return;
     stopTracks(); showSource(null);
@@ -346,12 +452,12 @@ function snapshot(maxEdge) {
   const input = source === "camera" ? video : livePhoto;
   const w = input.videoWidth || input.naturalWidth, h = input.videoHeight || input.naturalHeight;
   const ratio = reference.width / reference.height;
-  const cw = Math.min(w, h * ratio) / cameraZoom, ch = cw / ratio;
+  const {x,y,width:cw,height:ch} = cropRect(w,h,ratio,cameraZoom);
   const scale = Math.min(1, maxEdge / Math.max(cw, ch));
   const canvas = document.createElement("canvas");
   canvas.width = Math.max(1, Math.round(cw * scale));
   canvas.height = Math.max(1, Math.round(ch * scale));
-  canvas.getContext("2d").drawImage(input, (w-cw)/2, (h-ch)/2, cw, ch, 0, 0, canvas.width, canvas.height);
+  canvas.getContext("2d").drawImage(input, x, y, cw, ch, 0, 0, canvas.width, canvas.height);
   return canvas;
 }
 
@@ -360,7 +466,7 @@ function jpeg(canvas, quality) {
 }
 
 async function analyze() {
-  if (busy || !session || !source || document.hidden) return;
+  if (busy || focus.busy || !session || !source || document.hidden) return;
   if (!shotRequested && source === "camera" && (video.readyState < 2 || video.currentTime === lastVideoTime)) return;
   if (source === "photo" && latest?.ready && !shotRequested && !pendingTap && performance.now() - lastAnalyzed < 650) return;
   const version = generation, id = session, tap = pendingTap, taking = shotRequested;
@@ -369,7 +475,7 @@ async function analyze() {
   if (source === "camera") lastVideoTime = video.currentTime;
   try {
     // 快门请求分析和下载使用同一次采样，辅助线画在独立的 canvas 上。
-    const frame = taking || snapshot(960);
+    const frame = taking ? taking.frame : snapshot(960);
     const blob = await jpeg(frame, taking ? .94 : .9);
     if (version !== generation) return;
     const query = new URLSearchParams({seq:++seq, source:sourceVersion, skip:[...skipped].join(",")});
@@ -386,7 +492,11 @@ async function analyze() {
     if (!taking && alignZoom(result)) return;
     display(result);
     if (taking && result.ready) {
-      exportShot(blob);
+      // Apply the shutter-time filter only after verification, to the same frame.
+      const output = taking.filter.id === "none" || taking.filter.strength === 0 ? blob
+        : await jpeg(applyPhotoFilter(frame, taking.filter), .94);
+      if (version !== generation) return;
+      exportShot(output);
     }
   } catch (error) {
     if (version === generation) {
@@ -424,8 +534,8 @@ el("share-shot").onclick = async () => {
 };
 
 el("shutter").onclick = () => {
-  if (!latest?.ready || shotRequested) return;
-  shotRequested = snapshot(Infinity);
+  if (!latest?.ready || shotRequested || focus.busy) return;
+  shotRequested = {frame:snapshot(Infinity), filter:{...photoFilter}};
   el("shutter").disabled = true;
   analyze();
 };

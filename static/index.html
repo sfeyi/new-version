@@ -13,7 +13,7 @@
     <div class="workspace">
       <section class="camera" aria-label="取景和拍摄">
         <div id="viewport">
-          <div id="surface" hidden><video id="video" muted playsinline></video><img id="live-photo" hidden alt="当前试拍画面"><canvas id="overlay" aria-label="取景引导，可点选主角"></canvas></div>
+          <div id="surface" hidden><video id="video" muted playsinline></video><img id="live-photo" hidden alt="当前试拍画面"><canvas id="overlay" aria-label="取景引导，可点选主角"></canvas><span id="focus-marker" aria-hidden="true" hidden></span></div>
           <div id="empty"><span class="empty-frame" aria-hidden="true"></span><p>取景画面</p></div>
           <img id="scene-thumb" hidden alt="参考地标与拍摄方向">
           <div id="legend" hidden>
@@ -32,6 +32,25 @@
           <button id="restore-steps" type="button" hidden>恢复全部步骤</button>
           <button id="shutter" class="shutter" type="button" disabled><span aria-hidden="true"></span>拍摄并保存</button>
         </div>
+        <details class="photo-controls">
+          <summary>滤镜与对焦 <span id="filter-summary">原图</span></summary>
+          <div class="filter-controls">
+            <label for="photo-filter">照片滤镜</label>
+            <select id="photo-filter"><option value="none">原图</option><option value="fresh">清新</option><option value="warm">暖色</option><option value="film">复古</option><option value="mono">黑白</option></select>
+            <label for="filter-strength">强度 <output id="filter-strength-value" for="filter-strength">100%</output></label>
+            <input id="filter-strength" type="range" min="0" max="100" value="100" disabled>
+          </div>
+          <p class="control-note">滤镜同步用于取景预览和保存的照片。</p>
+          <div class="focus-controls" role="group" aria-label="相机对焦">
+            <button id="focus-auto" type="button" disabled>自动对焦</button>
+            <button id="focus-point" type="button" aria-pressed="false" disabled>点按对焦</button>
+          </div>
+          <div id="focus-manual-row" class="manual-focus" hidden>
+            <label for="focus-distance">手动调焦 <output id="focus-distance-value" for="focus-distance">50%</output></label>
+            <input id="focus-distance" type="range" min="0" max="100" value="50" aria-describedby="focus-status" disabled>
+          </div>
+          <p id="focus-status" class="control-note" role="status">开启相机后检测对焦功能。</p>
+        </details>
         <div id="export" class="export-photo" hidden><img id="last-shot" alt="刚拍摄的照片，可长按保存"><div><p>本次拍摄</p><button id="share-shot" type="button" hidden>保存到相册或分享</button> <a id="download-shot">下载 JPEG</a></div></div>
       </section>
       <aside>

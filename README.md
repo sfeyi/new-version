@@ -28,6 +28,41 @@ py -3.13 -m venv .venv
 .\start.cmd
 ```
 
+## 手机滤镜与对焦
+
+在取景区下方展开「滤镜与对焦」。原图、清新、暖色、复古、黑白可用于实时相机或照片试拍，强度为 0–100%。预览与保存的 JPEG 都应用滤镜；参考照和导拍算法仍使用原始颜色。快门按下时锁定画面与滤镜参数，核验该帧通过后才导出，不会把辅助线或对焦框写入照片。导出采用像素处理，不依赖手机浏览器是否实现 Canvas `filter`。
+
+开启相机后按当前镜头报告的能力启用控件：
+
+- **自动对焦**：优先请求持续自动对焦，仅支持单次自动对焦时请求单次对焦。
+- **点按对焦**：开启后，点击取景画面提交对焦位置；再次关闭可恢复原来的点选主角。位置会根据参考画幅裁切和数字变焦换算为相机源坐标。
+- **手动调焦**：仅在镜头开放手动模式及距离范围时显示。滑块表示设备范围内的相对位置，不代表变焦倍率，也不是统一的米数。
+
+设备未开放相应能力时控件禁用，照片试拍不显示手动调焦。浏览器返回请求成功也不等于主体已经清晰，界面只提示「已请求」，需要观察实际画面。设置被忽略、拒绝或超时会单独提示；超时后需重新开启相机。切换镜头会重新检测能力并丢弃旧请求的界面结果。对焦调整期间暂停导拍采样，调整后重新核验拍摄条件。
+
+这些是网页自身的滤镜与标准相机约束接口，不能调用手机厂商相机 App 的专属滤镜。[对焦与兴趣点的标准定义](https://w3c.github.io/mediacapture-image/)。不同手机、浏览器和前后镜头支持程度不同，真机对焦精度与耗时仍需现场验证。
+
+前端模块可复用，无新增运行依赖：
+
+| 模块接口 | 用途 |
+| --- | --- |
+| `filterSettings(id, strength)`、`filterCSS(settings)` | 创建滤镜参数（强度 0–1）并生成预览样式 |
+| `applyPhotoFilter(canvas, settings)` | 将滤镜写入已拍摄画布；原地修改，勿用于算法输入 |
+| `FocusController.bind(track, supportedConstraints)` | 绑定视频轨道，读取自动、点按和手动调焦能力 |
+| `auto()`、`point({x,y})`、`manual(fraction)` | 请求自动、归一化源坐标点按、相对位置手动调焦 |
+| `cameraPoint(point, width, height, aspect, zoom)` | 将画面上的归一化点击位置转换为源坐标 |
+
+接口位于 `static/filters.js` 和 `static/focus.js`。对焦结果包含 `status`：`requested`（请求完成）、`unconfirmed`（设置未获确认）、`failed`、`unavailable`、`busy`、`timeout` 或 `stale`。构建程序会自动把新增的静态模块纳入手机离线包及内容校验。
+
+验证命令（浏览器测试需安装 Pillow、Playwright 与 Chromium）：
+
+```sh
+node --test tests/camera_controls.test.mjs
+python tests/photo_controls_flow.py
+```
+
+浏览器测试使用模拟视频轨道和导拍响应，检查实际页面、滤镜预览与 JPEG 导出、原始帧传递、快门重新核验、对焦错误与镜头切换，以及窄屏布局；不代表已验证真实镜头自动对焦或完整模型推理。
+
 ## 手机版本如何发布
 
 推送到 `main` 后，GitHub Actions 从 `mobile/build.py` 构建静态页面并部署到 GitHub Pages。新仓库首次部署时，在 Settings → Pages → Build and deployment 中将 Source 设为 GitHub Actions。页面、模型与运行库均来自同一站点，离线下载会核对每个文件的 SHA-256。应用更新在关闭旧页面后生效。

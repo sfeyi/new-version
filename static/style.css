@@ -33,6 +33,22 @@
 .export-photo p {margin-bottom:5px}
 .export-photo a {color:var(--green)}
 
+.photo-controls {margin:0 16px 14px;border-top:1px solid #d5dbd0;padding-top:10px;font-size:14px}
+.photo-controls summary {cursor:pointer;padding:6px 0;font-weight:600}
+#filter-summary {font-size:12px;font-weight:400;color:#657163;margin-left:8px}
+.filter-controls {display:grid;grid-template-columns:auto minmax(100px,1fr);gap:10px 14px;align-items:center;margin-top:10px}
+.filter-controls select {min-height:40px;width:100%;font:inherit;color:inherit;background:#fcfcf8;border:1px solid #ccd3c9;border-radius:6px;padding:6px}
+.photo-controls input[type=range] {width:100%;min-width:0;min-height:36px;accent-color:var(--green);margin:0}
+.photo-controls output {font-size:12px;color:#657163;margin-left:6px}
+.control-note {font-size:12px;color:#516653;line-height:1.6;margin-top:8px;overflow-wrap:anywhere}
+.focus-controls {display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.focus-controls button[aria-pressed=true] {background:var(--green);color:white;border-color:var(--green)}
+.focus-controls button:disabled {opacity:.55;cursor:default}
+.manual-focus {margin-top:10px;display:grid;grid-template-columns:auto minmax(80px,1fr);align-items:center;gap:14px}
+.photo-controls :is(select,input,summary):focus-visible {outline:3px solid #ba852b;outline-offset:3px}
+#surface>#focus-marker {inset:auto;width:44px;height:44px;border:2px solid var(--gold);border-radius:6px;transform:translate(-50%,-50%);pointer-events:none;box-shadow:0 0 0 1px #17292380}
+#focus-marker[data-state=unconfirmed],#focus-marker[data-state=failed] {border-style:dashed}
+
 @media(max-width:760px) {
   body[data-reference=empty] aside {
     order:-1;
