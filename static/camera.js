@@ -6,6 +6,7 @@ import {HintPacer} from "./hints.js";
 import {FramingSequence} from "./framing.js";
 import {nativeAndroid, saveNativePhoto, shareNativePhoto} from "./native-export.js";
 import {FrameSampler} from "./frame-sampler.js";
+import {DemoMarker} from "./demo.js";
 
 const el = id => document.getElementById(id);
 const video = el("video"), livePhoto = el("live-photo"), refPhoto = el("reference");
@@ -19,7 +20,13 @@ let session = null, reference = null, referenceFile = null, refUrl = null;
 let stream = null, liveUrl = null, source = null, facing = "environment";
 let referenceVersion = 0, sourceVersion = 0, generation = 0;
 let cameraOpening = null;
-const sampler = new FrameSampler();
+let sampler = new FrameSampler();
+if (!nativeAndroid) el("guide-mode").value = "live";
+const isDemo = () => nativeAndroid && el("guide-mode").value === "demo";
+let demoZoomPlayed = false;
+const demoMarker = new DemoMarker(el("demo-aim"), el("demo-dot"), () => {
+  if (isDemo() && shownStage === "background") advanceDemo();
+});
 let analysisPaused = false, networkPaused = false, nextAnalysisAt = 0;
 let measuredFrames = 0, lastMeasuredFrames = null, lastPreviewMeasure = 0, previewFrameRequest = null;
 let prepareMs = 0, requestMs = 0, serverMs = 0;
@@ -46,14 +53,16 @@ if (nativeAndroid && globalThis.PerformanceObserver?.supportedEntryTypes?.includ
 
 function paintOverlay(now = performance.now()) {
   const show = el("show-guides").checked;
-  el("overlay").hidden = analysisPaused || !show;
+  const demoAiming = isDemo() && shownStage === "background";
+  demoMarker.show(demoAiming && !!reference && !!source && show && !analysisPaused && !document.hidden);
+  el("overlay").hidden = analysisPaused || !show || demoAiming;
   if (analysisPaused) {
     el("aim-transition").hidden = el("framing-status").hidden = el("legend").hidden = true;
     return;
   }
   const framingVisual = updateFraming(now);
   const visual = aim.sample(now);
-  if (show) {
+  if (show && !demoAiming) {
     const started = performance.now();
     drawGuide(el("overlay"), latest, reference, shownStage, visual, framingVisual);
     overlayMs += performance.now()-started;
@@ -119,9 +128,21 @@ function setCameraZoom(value) {
 }
 
 function updateFraming(now = performance.now()) {
-  const state = framingSequence.sample(now);
+  let state = framingSequence.sample(now);
+  if (isDemo() && shownStage === "framing" && state.phase === "adjust" && !demoZoomPlayed && el("auto-zoom").checked) {
+    demoZoomPlayed = true;
+    framingSequence.beginZoom(cameraZoom, Math.min(1.6,cameraZoom*1.12), now);
+    state = framingSequence.sample(now);
+  }
   if (state.zoom !== null && Math.abs(state.zoom-cameraZoom) > .00001) setCameraZoom(state.zoom);
   if (state.phase === "verify" && paintedFramingPhase === "zoom") {
+    if (isDemo()) {
+      framingSequence.finishVerification();
+      state = framingSequence.sample(now);
+      tell("演示 · 调整景别", "演示变焦完成，可拖动倍率微调，再确认景别");
+      paintedFramingPhase = state.phase;
+      return state;
+    }
     // Inference resumes only after the final preview/capture crop has reached its target.
     generation++;
     latest = null;
@@ -175,6 +196,7 @@ function showReferenceGuide() {
   if (!shownStage || shownStage === "background") note = "白点锁在同一处景物上，白环固定在镜头中央。缓慢转动手机让两者接近；成功后只需继续下一步。";
   if (shownStage === "framing") note = "背景轮廓固定在参考构图上。轮廓显现后会平滑匹配倍率，也可以拖动滑杆手动调整。";
   if (shownStage === "position") note = "红框固定标出参考人物的位置和大小。先让模特走进框内，再调整动作。";
+  if (isDemo()) note = "演示模式：白点按手机转动近似跟随，可点按重新放置；站位和姿势由你手动确认。参考轮廓来自这张照片。";
   el("subject-note").textContent = (refMirrored ? "参考照已水平翻转。" : "") + note;
 }
 
@@ -186,6 +208,7 @@ function display(result, pendingStage) {
   }
   const previousStage = shownStage;
   shownStage = result?.stage ?? (reference && source ? pendingStage ?? stages.find(s => !skipped.has(s) && !completed.has(s)) : null);
+  if (previousStage !== shownStage && shownStage === "framing") demoZoomPlayed = false;
   if (shownStage === "framing" && reference && source) framingSequence.enter(performance.now());
   else {framingSequence.reset(); paintedFramingPhase = "idle";}
   aim.update(result, performance.now());
@@ -219,17 +242,54 @@ function display(result, pendingStage) {
   el("legend").dataset.stage = shownStage || "";
   el("legend").dataset.background = building || backgroundShape ? "outline" : background ? "rings" : "";
   const poseLabel = {person:"参考动作轮廓", joints:"简化动作轮廓"}[reference?.outline?.kind] || "参考关节";
-  el("target-label").textContent = building ? building.name + "参考轮廓" : backgroundShape ? "参考背景轮廓" : framing ? "参考地标" : aiming ? "参考中心" : standing ? "目标站位" : poseLabel;
+  el("target-label").textContent = building ? building.name + "参考轮廓" : backgroundShape ? "参考背景轮廓" : framing ? "参考地标" : aiming ? (isDemo() ? "演示落点" : "参考中心") : standing ? "目标站位" : poseLabel;
   el("current-label").textContent = background ? "镜头中心" : standing ? "当前人物" : "实时关节";
   el("current-key").hidden = !(aiming || standing && result?.selected ||
     posing && result?.pose?.actual.some(Boolean));
   el("zoom-controls").hidden = !framing || !source;
   el("scene-thumb").hidden = !background || result?.mode === "hold";
+  updateDemoUI();
   if (result) {
     const adjustingScale = framing && ["coverage", "steady", "scale"].includes(result.background?.control);
     tell(adjustingScale ? "摄影者 · 匹配景别" : actors[index], result.message, result.mode, true);
   }
 }
+
+function demoFrame(stage) {
+  const index = stages.indexOf(stage);
+  const messages = {
+    background:"点按地标放置白点，缓慢转动手机让它靠近白环；也可手动确认",
+    framing:"对照参考轮廓调整画面，景别合适后点击确认",
+    position:"请模特站进参考人物框，位置合适后点击确认",
+    pose:"请模特照着参考动作摆姿势，完成后点击确认",
+    ready:"演示步骤已确认，可以拍摄"
+  };
+  return {demo:true,stage,ready:stage === "ready",mode:stage === "ready" ? "ready" : "adjust",message:messages[stage],
+    boxes:[],selected:null,background:null,pose:null,hold:0,checks:stages.slice(0,4).map((_,i)=>i<index),
+    completed:index>0 && !skipped.has("background") ? ["background"] : [],skipped:[...skipped]};
+}
+
+function updateDemoUI() {
+  const demo = isDemo();
+  el("demo-badge").hidden = !demo || !source;
+  el("demo-controls").hidden = !demo || !reference || !source;
+  el("pause-analysis").hidden = demo;
+  if (demo && source !== "camera") el("preview-status").textContent = "演示模式 · 手动确认";
+  el("auto-zoom-label").textContent = demo ? "演示变焦" : "自动匹配";
+  const captions = {background:"确认对准",framing:"景别已合适",position:"站位已合适",pose:"动作已摆好",ready:"演示完成"};
+  el("demo-next").textContent = captions[shownStage] || "确认对准";
+  el("demo-next").disabled = shownStage === "ready";
+  el("demo-help").textContent = shownStage === "background" ? "白点按手机转动近似跟随；无方向数据时可点按放置并手动确认。"
+    : "演示模式：站位和动作由你确认，保留参考轮廓作为提示。";
+}
+
+function advanceDemo() {
+  if (!isDemo() || !reference || !source || shownStage === "ready") return;
+  const next = stages.slice(stages.indexOf(shownStage)+1).find(s=>!skipped.has(s)) || "ready";
+  invalidate(next);
+}
+el("demo-next").onclick = advanceDemo;
+el("demo-aim").onclick = event => {if (isDemo()) demoMarker.place(positionIn(event));};
 
 function invalidate(stage, tap = null, preserveFraming = false) {
   generation++;
@@ -240,14 +300,15 @@ function invalidate(stage, tap = null, preserveFraming = false) {
   const context = referenceVersion + ":" + sourceVersion;
   const preserve = context === guideContext;
   if (!preserve || !preserveFraming) {framingSequence.reset(); paintedFramingPhase = "idle";}
-  if (!preserve) {completed.clear(); hints.reset();}
+  if (!preserve) {completed.clear(); hints.reset(); demoMarker.reset(); demoZoomPlayed = false;}
   guideContext = context;
   aim.reset(reference ? reference.width/reference.height : 1, preserve);
-  display(null, stage);
+  display(isDemo() && reference && source ? demoFrame(stage || (preserve ? shownStage : null) || stages.find(s=>!skipped.has(s)&&!completed.has(s)) || "ready") : null, stage);
 }
 
 function applySteps(nextStage) {
   invalidate(nextStage, pendingTap);
+  if (isDemo()) return;
   if (!shownStage) {promptForInput(); return;}
   tell(actors[stages.indexOf(shownStage)], "正在读取取景画面");
   analyze();
@@ -283,6 +344,7 @@ function layout() {
   if (ratio) fit(refSurface, el("ref-box"), ratio);
   const sourceRatio = source === "camera" ? video.videoWidth / video.videoHeight : livePhoto.naturalWidth / livePhoto.naturalHeight;
   fit(surface, el("viewport"), ratio || sourceRatio || 4/3);
+  demoMarker.configure(surface.clientWidth || 1,surface.clientHeight || 1,ratio || sourceRatio || 4/3,facing === "user");
   showReferenceGuide();
   renderOverlay();
 }
@@ -294,6 +356,7 @@ resize.observe(el("ref-box"));
 function promptForInput() {
   if (!session) tell("准备", "从图库选一张参考照，或打开本地照片");
   else if (!source) tell("摄影者", "开启相机，或载入一张照片试拍");
+  else if (isDemo()) display(demoFrame(shownStage || "background"));
   else {
     display(null);
     let message = "正在读取取景画面";
@@ -397,6 +460,7 @@ el("ref-overlay").onclick = e => {
   if (referenceFile) loadReference(referenceFile, positionIn(e));
 };
 el("overlay").onclick = e => {
+  if (isDemo()) return;
   if (!session || !source) return;
   if (shownStage === "background" || shownStage === "framing") return;
   invalidate();
@@ -407,15 +471,17 @@ el("overlay").onclick = e => {
 el("zoom").oninput = e => {
   if (!reference || !source) return;
   el("auto-zoom").checked = false;
+  demoZoomPlayed = true;
   framingSequence.cancelZoom();
   setCameraZoom(Number(e.target.value));
   invalidate("framing", null, true);
-  tell("摄影者 · 调整景别", "倍率已调整，正在核对建筑轮廓");
+  tell("摄影者 · 调整景别", isDemo() ? "倍率已调整，景别合适后点击确认" : "倍率已调整，正在核对建筑轮廓");
 };
 el("auto-zoom").onchange = () => {
+  if (isDemo()) demoZoomPlayed = !el("auto-zoom").checked;
   framingSequence.cancelZoom();
   invalidate("framing", null, true);
-  tell("摄影者 · 调整景别", el("auto-zoom").checked ? "将根据新的取景画面自动匹配倍率" : "已切换为手动调整倍率");
+  tell("摄影者 · 调整景别", isDemo() ? "演示倍率可随时手动调整" : el("auto-zoom").checked ? "将根据新的取景画面自动匹配倍率" : "已切换为手动调整倍率");
 };
 const cancelLibrarySelection = setupLibrary((file, note) => loadReference(file, undefined, note), onDevice);
 window.addEventListener("campus-server-changed", () => {
@@ -467,6 +533,7 @@ function showSource(kind) {
 
 async function startCamera() {
   if (cameraOpening !== null) return;
+  if (isDemo()) demoMarker.requestSensors();
   if (!navigator.mediaDevices?.getUserMedia) {
     tell("相机", "请在 localhost 或 HTTPS 页面开启相机，也可以用照片试拍", "search");
     return;
@@ -561,7 +628,7 @@ function sampledShot(frozen) {
 }
 
 async function analyze() {
-  if (busy || !session || !source || document.hidden || analysisPaused) return;
+  if (isDemo() || busy || !session || !source || document.hidden || analysisPaused) return;
   if (nativeAndroid && !shotRequested && !pendingTap && performance.now() < nextAnalysisAt) return;
   if (updateFraming().blockAnalysis) return;
   if (!shotRequested && source === "camera" && (video.readyState < 2 || video.currentTime === lastVideoTime)) return;
@@ -670,14 +737,36 @@ el("download-shot").onclick = async event => {
   finally {savingNative = false;}
 };
 
-el("shutter").onclick = () => {
+el("shutter").onclick = async () => {
   if (!latest?.ready || shotRequested) return;
   shotRequested = snapshot(Infinity);
   el("shutter").disabled = true;
+  if (isDemo()) {
+    const version = generation, frozen = shotRequested;
+    try {
+      const blob = await jpeg(frozen,.94);
+      if (version === generation) exportShot(blob);
+    } catch (error) {if (version === generation) tell("拍摄",error.message,"error");}
+    finally {if (version === generation) {shotRequested=false;el("shutter").disabled=!latest?.ready;}}
+    return;
+  }
   analyze();
 };
 
 el("preview-controls").hidden = !nativeAndroid;
+el("guide-mode").onchange = () => {
+  generation++;
+  analysisPaused = networkPaused = false;
+  el("pause-analysis").textContent = "暂停识别";
+  el("pause-analysis").setAttribute("aria-pressed","false");
+  sampler.dispose();sampler = new FrameSampler();
+  skipped.clear();completed.clear();demoMarker.reset();
+  updateDemoUI();
+  // Reopen the stream to release any textures/readback work left by live sampling.
+  if (source === "camera") startCamera();
+  else {++sourceVersion;invalidate();promptForInput();}
+};
+updateDemoUI();
 function setAnalysisPaused(paused, disconnected = false) {
   analysisPaused = paused;
   networkPaused = paused && disconnected;
@@ -717,13 +806,14 @@ if (nativeAndroid) setInterval(() => {
   lastMeasuredFrames = frames || 0;
   lastPreviewMeasure = now;
   el("preview-status").textContent = (fps === null ? "本地预览" : "预览约 " + Math.round(fps) + " 帧/秒") +
-    (analysisPaused ? " · 识别已暂停" : " · 识别最多每秒一次");
+    (isDemo() ? " · 演示模式 · 手动确认" : analysisPaused ? " · 识别已暂停" : " · 识别最多每秒一次");
   window.__guidePerformance = {previewFps:fps,prepareMs,requestMs,serverMs,completedAnalyses,worker:!!sampler.worker,busy,analysisPaused,
-    guidesVisible:el("show-guides").checked,overlayPaints,overlayMs,longTaskMs};
+    guidesVisible:el("show-guides").checked,overlayPaints,overlayMs,longTaskMs,mode:isDemo()?"demo":"live"};
   overlayPaints = overlayMs = longTaskMs = 0;
 }, 1000);
 
 setInterval(() => {
+  if (isDemo()) return;
   if (source === "camera" && latest && !busy && !framingSequence.sample(performance.now()).blockAnalysis && performance.now() - lastAnalyzed > 2500) {
     display(null);
     tell("相机", "等待新的取景画面", "search");
@@ -738,6 +828,6 @@ document.addEventListener("visibilitychange", () => {
     renderOverlay();
   }
 });
-window.addEventListener("pagehide", () => {cancelOverlay(); sampler.dispose(); cancelCameraOpening(); releaseGuide(session); stopTracks();});
+window.addEventListener("pagehide", () => {demoMarker.dispose();cancelOverlay(); sampler.dispose(); cancelCameraOpening(); releaseGuide(session); stopTracks();});
 window.addEventListener("pageshow", e => {if (e.persisted) location.reload();});
 

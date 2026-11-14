@@ -34,7 +34,8 @@
     <div class="workspace">
       <section class="camera" aria-label="取景和拍摄">
         <div id="viewport">
-          <div id="surface" hidden><video id="video" muted playsinline></video><img id="live-photo" hidden alt="当前试拍画面"><canvas id="overlay" aria-label="取景引导，可点选主角"></canvas></div>
+          <div id="surface" hidden><video id="video" muted playsinline></video><img id="live-photo" hidden alt="当前试拍画面"><canvas id="overlay" aria-label="取景引导，可点选主角"></canvas><div id="demo-aim" hidden aria-label="点按景物放置演示白点"><i class="demo-ring"></i><i id="demo-dot"></i></div></div>
+          <div id="demo-badge" hidden>演示 · 手动确认</div>
           <div id="empty"><span class="empty-frame" aria-hidden="true"></span><p>取景画面</p></div>
           <img id="scene-thumb" hidden alt="参考地标与拍摄方向">
           <div id="aim-transition" class="aim-transition" role="status" hidden><strong>中心已锁定</strong><span id="aim-next">下一步 · 调整景别</span></div>
@@ -49,8 +50,10 @@
           <button id="skip-stage" type="button" hidden>跳过对准</button>
           <progress id="hold" max="1" value="0" aria-label="稳定进度" hidden></progress>
         </div>
-        <div id="zoom-controls" class="zoom-controls" hidden><label for="zoom">景别</label><input id="zoom" type="range" min="1" max="1.6" step="0.01" value="1"><output id="zoom-value" for="zoom">1.00×</output><label><input id="auto-zoom" type="checkbox" checked>自动匹配</label></div>
+        <div id="zoom-controls" class="zoom-controls" hidden><label for="zoom">景别</label><input id="zoom" type="range" min="1" max="1.6" step="0.01" value="1"><output id="zoom-value" for="zoom">1.00×</output><label><input id="auto-zoom" type="checkbox" checked><span id="auto-zoom-label">自动匹配</span></label></div>
+        <div id="demo-controls" class="preview-controls" hidden><span id="demo-help">演示模式使用近似方向跟随，站位和动作由你确认。</span><button id="demo-next" type="button">确认对准</button></div>
         <div id="preview-controls" class="preview-controls" hidden>
+          <label>导拍<select id="guide-mode"><option value="demo">录制演示</option><option value="live">实时识别</option></select></label>
           <label>预览<select id="preview-quality"><option value="720">流畅优先 · 720p</option><option value="1080">清晰优先 · 1080p</option></select></label>
           <button id="pause-analysis" type="button" aria-pressed="false">暂停识别</button>
           <label><input id="show-guides" type="checkbox" checked>显示辅助线</label>

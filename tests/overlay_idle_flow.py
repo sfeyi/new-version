@@ -68,7 +68,7 @@ def main():
     report = {"scope":"Same synthetic camera, controlled HTTP; drawing work, not Xiaomi FPS"}
     with sync_playwright() as pw:
         browser = pw.chromium.launch(executable_path=browser_path())
-        for name, directory in (("1.0.1",baseline), ("1.0.2",ROOT / "build/android-web")):
+        for name, directory in (("1.0.1",baseline), ("current",ROOT / "build/android-web")):
             server = ThreadingHTTPServer(("127.0.0.1",0),functools.partial(Site,directory=directory))
             Thread(target=server.serve_forever,daemon=True).start()
             errors = []
@@ -82,6 +82,8 @@ def main():
                 page = context.new_page()
                 page.on("pageerror",lambda error:errors.append(str(error)))
                 page.goto(f"http://127.0.0.1:{server.server_port}/")
+                if page.locator("#guide-mode").count():
+                    page.locator("#guide-mode").select_option("live")
                 page.locator("#computer-server").fill("http://127.0.0.1:7862")
                 page.locator("#computer-connect-button").click()
                 expect(page.locator("#computer-status")).to_contain_text("已连接电脑")
@@ -123,7 +125,7 @@ def main():
             finally:
                 server.shutdown();server.server_close()
         browser.close()
-    assert report["1.0.2"]["canvas_pixels"]*3 < report["1.0.1"]["canvas_pixels"]
+    assert report["current"]["canvas_pixels"]*3 < report["1.0.1"]["canvas_pixels"]
     report["passed"]=True
     (qa / "overlay-idle-comparison.json").write_text(json.dumps(report,indent=2)+"\n",encoding="utf-8")
     print(json.dumps(report,indent=2),flush=True)

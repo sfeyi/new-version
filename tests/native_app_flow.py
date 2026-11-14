@@ -214,6 +214,7 @@ def main():
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.on("download", lambda download: downloads.append(download.suggested_filename))
             page.goto(url, wait_until="domcontentloaded", timeout=90000)
+            page.locator("#guide-mode").select_option("live")
             expect(page.locator("#offline")).to_be_hidden()
             expect(page.locator("#computer-connect")).to_be_visible()
             expect(page.locator("#library-connection")).to_be_hidden()
