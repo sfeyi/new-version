@@ -53,12 +53,14 @@ def expect_camera_rings(page, live_x):
       const {width:w, height:h} = canvas;
       if (!w || !h || document.getElementById('legend').dataset.stage !== 'background') return false;
       const pixels = canvas.getContext('2d').getImageData(0, 0, w, h).data;
-      const gold = [], mint = [];
+      const dot = [], white = [];
       for (let y = 0; y < h; y += 2) for (let x = 0; x < w; x += 2) {
         const i = (y*w+x)*4;
         if (pixels[i+3] < 190) continue;
-        if (pixels[i] > 235 && pixels[i+1] > 185 && pixels[i+2] < 135) gold.push([x/w, y/h]);
-        if (pixels[i] < 120 && pixels[i+1] > 215 && pixels[i+2] > 165) mint.push([x/w, y/h]);
+        if (pixels[i] > 235 && pixels[i+1] > 235 && pixels[i+2] > 220) {
+          if (Math.hypot(x-w/2,y-h/2)<22) white.push([x/w, y/h]);
+          else if (Math.hypot(x-w/2,y-h/2)>35) dot.push([x/w, y/h]);
+        }
       }
       function at(points, x) {
         if (points.length < 8) return false;
@@ -67,7 +69,7 @@ def expect_camera_rings(page, live_x):
           return Math.abs((Math.max(...coords)+Math.min(...coords))/2-v) < .012;
         });
       }
-      return at(gold, .5) && (expected === null ? !mint.length : at(mint, expected));
+      return at(white, .5) && (expected === null ? !dot.length : at(dot, expected));
     }""", arg=live_x, timeout=15000)
 
 
@@ -80,7 +82,7 @@ def expect_building_outline(page, paths, canvas_id="overlay"):
       const pixels=c.getContext('2d').getImageData(0,0,w,h).data;
       const gold=(x,y)=>{
         const i=4*(y*w+x);
-        return pixels[i]>228 && pixels[i+1]>165 && pixels[i+2]<150 && pixels[i+3]>160;
+        return pixels[i]>80 && pixels[i]<190 && pixels[i+1]>170 && pixels[i+2]>215 && pixels[i+3]>160;
       };
       let total=0, matched=0;
       for (const line of paths) for (let j=1; j<line.length; j++) {
@@ -107,7 +109,7 @@ def expect_position_box(page, box):
       let gold=0;
       for (let y=0;y<h;y+=2) for (let x=0;x<w;x+=2) {
         const i=4*(y*w+x);
-        if (data[i]<230 || data[i+1]<180 || data[i+2]>140 || data[i+3]<180) continue;
+        if (data[i]<220 || data[i+1]>125 || data[i+2]>150 || data[i+3]<180) continue;
         if (Math.min(Math.abs(x-l),Math.abs(x-r),Math.abs(y-t),Math.abs(y-b))>3) return false;
         gold++;
       }
@@ -117,7 +119,7 @@ def expect_position_box(page, box):
 
 def expect_zoom_verification(frames):
     command = next(i for i, r in enumerate(frames) if r["background"] and r["background"].get("zoomFactor"))
-    assert frames[command]["stage"] == "background" and not frames[command]["checks"][0]
+    assert frames[command]["stage"] == "framing" and not frames[command]["checks"][1]
     assert .68 < frames[command]["background"]["zoom"] < .72
     first_position = next(i for i, r in enumerate(frames) if r["stage"] == "position")
     assert first_position > command
@@ -153,6 +155,8 @@ def main():
     Thread(target=server.serve_forever, daemon=True).start()
     address = f"http://127.0.0.1:{server.server_port}"
     errors = []
+    qa = BASE / "build/qa"
+    qa.mkdir(parents=True, exist_ok=True)
     try:
         with sync_playwright() as playwright:
             cached = list((BASE.parent / ".browser").glob("chromium_headless_shell-*/**/chrome-headless-shell.exe"))
@@ -173,7 +177,12 @@ def main():
             page.goto(address)
             shutter = page.locator("#shutter")
             expect(shutter).to_be_disabled()
-            page.locator("#ref-file").set_input_files(photo)
+            expect(page.locator("#library-count")).to_contain_text("98")
+            page.locator("#library-query").fill("REF_011")
+            page.locator("#library-search button[type=submit]").click()
+            expect(page.locator(".photo-card")).to_have_count(1)
+            page.locator("#library-panel").screenshot(path=str(qa / "00-library.png"))
+            page.locator(".photo-card").click()
             expect(page.locator("#viewpoint")).to_contain_text("科学与艺术大楼")
             page.locator("#live-file").set_input_files(photo)
             expect(shutter).to_be_enabled(timeout=15000)
@@ -224,13 +233,19 @@ def main():
             expect(page.locator("#hint")).to_contain_text("向右转", timeout=15000)
             expect(shutter).to_be_disabled()
             expect_camera_rings(page, .67)
+            page.locator(".camera").screenshot(path=str(qa / "01-aim.png"))
             expect(page.locator("#source-state")).to_have_text("相机取景")
             page.evaluate("window.scene = 'nearRight'")
-            expect_camera_rings(page, .57)
+            expect(page.locator("#overlay")).to_have_attribute("data-aim", re.compile(r"near|aligned"), timeout=15000)
+            expect(page.locator("#aim-transition")).to_be_visible(timeout=15000)
+            expect(page.locator("#aim-transition strong")).to_have_text("中心已锁定")
+            page.locator(".camera").screenshot(path=str(qa / "06-center-locked.png"))
             ref = references[-1]
             expect_position_box(page, ref["box"])
+            page.locator(".camera").screenshot(path=str(qa / "03-position.png"))
             page.evaluate("window.scene = 'poseRight'")
             expect_fixed_outline(page, ref["outline"])
+            page.locator(".camera").screenshot(path=str(qa / "04-pose.png"))
             expect(page.locator("#hint")).to_contain_text("向画面左", timeout=10000)
             page.evaluate("window.scene = 'poseLeft'")
             expect(page.locator("#hint")).to_contain_text("向画面右", timeout=10000)
@@ -238,6 +253,10 @@ def main():
             if os.environ.get("GUIDE_QA_POSE"):
                 page.locator(".camera").screenshot(path=os.environ["GUIDE_QA_POSE"])
             page.evaluate("window.scene = 'right'")
+            # Center alignment is a one-time completion, not a live gate that reopens on drift.
+            expect(page.locator("#restart-aim")).to_be_visible()
+            expect(page.locator("#steps li").first).to_have_class("done")
+            page.locator("#restart-aim").click()
             expect_camera_rings(page, .67)
             start = len(frames)
             page.evaluate("window.scene = 'centeredWide'")
@@ -249,20 +268,26 @@ def main():
             expect(page.locator("#source-state")).to_contain_text("1.60×")
             expect(shutter).to_be_disabled()
             page.evaluate("window.scene = 'right'")
+            page.locator("#restart-aim").click()
             expect(page.locator("#hint")).to_contain_text("向右转", timeout=15000)
             page.evaluate("window.scene = 'small'")
             expect(page.locator("#source-state")).to_have_text(re.compile(r"相机取景 · 1\.2\d×"), timeout=15000)
             expect(shutter).to_be_enabled(timeout=20000)
             page.evaluate("window.scene = 'right'")
+            page.locator("#restart-aim").click()
             expect(page.locator("#hint")).to_contain_text("向右转", timeout=15000)
             page.evaluate("window.scene = 'same'")
             expect(shutter).to_be_enabled(timeout=20000)
             page.evaluate("window.scene = 'blank'")
             expect(shutter).to_be_disabled(timeout=5000)
-            expect(page.locator("#hint")).to_contain_text("取景")
+            expect(page.locator("#steps li").first).to_have_class("done")
+            expect(page.locator("#skip-stage")).to_have_text("跳过景别")
+            page.locator("#restart-aim").click()
             expect_camera_rings(page, None)
             skip = page.locator("#skip-stage")
-            expect(skip).to_have_text("跳过机位")
+            expect(skip).to_have_text("跳过对准")
+            skip.click()
+            expect(skip).to_have_text("跳过景别")
             skip.click()
             expect(skip).to_have_text("跳过站位")
             expect(page.locator("#hint")).to_contain_text("目标框")
@@ -273,7 +298,7 @@ def main():
             expect_fixed_outline(page, ref["outline"])
             skip.click()
             expect(shutter).to_be_enabled()
-            expect(page.locator("#steps li.skipped")).to_have_count(3)
+            expect(page.locator("#steps li.skipped")).to_have_count(4)
             with page.expect_download() as manual:
                 shutter.click()
             with Image.open(manual.value.path()) as image:
@@ -282,12 +307,12 @@ def main():
             expect(page.locator("#steps li.skipped")).to_have_count(0)
             expect(shutter).to_be_disabled()
             expect_camera_rings(page, None)
-            # 打开新的参考文件同样恢复三个步骤。
+            # 打开新的参考文件同样恢复四个步骤。
             skip.click()
             expect(page.locator("#steps li.skipped")).to_have_count(1)
             page.locator("#ref-file").set_input_files(photo)
             expect(page.locator("#steps li.skipped")).to_have_count(0)
-            expect(skip).to_have_text("跳过机位")
+            expect(skip).to_have_text("跳过对准")
             page.evaluate("window.scene = 'same'")
             expect(shutter).to_be_enabled(timeout=20000)
             if os.environ.get("GUIDE_QA_SCREENSHOT"):
@@ -304,6 +329,10 @@ def main():
             page.locator("#ref-file").set_input_files(next(library.rglob("REF_046.webp")))
             page.locator("#live-file").set_input_files(next(library.rglob("REF_095.webp")))
             expect(page.locator("#hint")).to_contain_text("向左转", timeout=15000)
+            expect(page.locator("#legend")).to_have_attribute("data-background", "rings")
+            expect(page.locator("#target-label")).to_have_text("参考中心")
+            # 尚未对准时不画建筑轮廓；手动跳过对准后，独立核对景别。
+            skip.click()
             expect(page.locator("#target-label")).to_have_text("圆塔参考轮廓")
             outline = references[-1]["buildingOutline"]
             expect_building_outline(page, outline["paths"])
@@ -318,7 +347,7 @@ def main():
             blank = io.BytesIO()
             Image.new("RGB", (640,960), (80,85,90)).save(blank, "JPEG")
             page.locator("#live-file").set_input_files({"name":"blank.jpg","mimeType":"image/jpeg","buffer":blank.getvalue()})
-            expect(page.locator("#hint")).to_contain_text("金色参考轮廓", timeout=15000)
+            expect(page.locator("#hint")).to_contain_text("继续核对景别", timeout=15000)
             expect_building_outline(page, outline["paths"])
             skip.click()
             expect_position_box(page, references[-1]["box"])
@@ -329,9 +358,14 @@ def main():
             page.evaluate("window.scene = 'rightWide'")
             page.locator("#camera").click()
             expect(page.locator("#hint")).to_contain_text("向右转", timeout=15000)
-            expect_building_outline(page, outline["paths"])
+            expect_camera_rings(page, .67)
             start = len(frames)
-            page.evaluate("window.scene = 'centeredWide'")
+            page.evaluate("document.getElementById('auto-zoom').checked = false; window.scene = 'centeredWide'")
+            expect_building_outline(page, outline["paths"])
+            expect(page.locator("#zoom-controls")).to_be_visible()
+            expect(page.locator("#source-state")).to_have_text("相机取景")
+            page.locator(".camera").screenshot(path=str(qa / "02-framing.png"))
+            page.locator("#auto-zoom").check()
             expect(shutter).to_be_enabled(timeout=20000)
             expect_zoom_verification(frames[start:])
             expect(page.locator("#legend")).not_to_have_attribute("data-background", "outline")
@@ -340,6 +374,8 @@ def main():
             # 切换到钟楼，近景可用钟面和墙面两边对齐。参考翻转后目标随之镜像。
             clock_photo = next(library.rglob("REF_029.webp"))
             page.locator("#ref-file").set_input_files(clock_photo)
+            expect(page.locator("#skip-stage")).to_have_text("跳过对准", timeout=20000)
+            skip.click()
             expect(page.locator("#target-label")).to_have_text("钟楼参考轮廓", timeout=20000)
             clock_outline = references[-1]["buildingOutline"]
             expect_building_outline(page, clock_outline["paths"])
@@ -352,14 +388,14 @@ def main():
             # 同样标注在钟楼的栏杆取景没有清晰塔楼，应恢复双圈。
             page.locator("#ref-file").set_input_files(next(library.rglob("REF_062.webp")))
             expect(page.locator("#legend")).to_have_attribute("data-background","rings",timeout=20000)
-            expect(page.locator("#target-label")).to_have_text("机位容差")
+            expect(page.locator("#target-label")).to_have_text("参考中心")
             expect_camera_rings(page, None)
             assert not errors, errors
             browser.close()
     finally:
         server.shutdown()
         server.server_close()
-    print("Fixed tower outline, clock, rings fallback, camera zoom, pose, skips and clean JPEG verified.")
+    print("Library selection, smoothed white target/ring, alignment feedback, cyan outline, position, pose, zoom, skips and clean JPEG verified.")
 
 
 if __name__ == "__main__":

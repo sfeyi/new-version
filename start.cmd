@@ -4,5 +4,5 @@ cd /d "%~dp0"
 set "GUIDE_PY=python"
 if exist "..\.venv\Scripts\python.exe" set "GUIDE_PY=..\.venv\Scripts\python.exe"
 if exist ".venv\Scripts\python.exe" set "GUIDE_PY=.venv\Scripts\python.exe"
-"%GUIDE_PY%" app.py
+"%GUIDE_PY%" -X utf8 launch.py
 if errorlevel 1 pause

@@ -26,11 +26,29 @@ class Background(Prepared):
         self.landmarks = reference_landmarks(gray, mask)
         self.template = gray, mask
         self.learned = {}
+        self.subject = None
         self.reference = self.features(gray, mask)
         self.flipped = self.features(cv2.flip(gray, 1), cv2.flip(mask, 1))
         self.usable = len(self.reference[0]) >= 8 or len(self.flipped[0]) >= 8 or bool(len(self.landmarks))
+        self._anchor_serial = 0
+        self.reset_tracking()
 
     __init__ = synchronous(prepare)
+
+    def reset_tracking(self):
+        """新的取景来源必须重新定锚，不能沿用上一段画面的运动。"""
+        self._scene = None
+        self._reacquire = None
+        self._had_anchor = False
+
+    def set_subject(self, outline):
+        # 用建筑内的匹配证据确认地标，中心仍投影参考画幅的中心，保持原构图。
+        if outline and outline.get("bounds"):
+            bounds = np.array(outline["bounds"])
+            points = self.reference[0]
+            inside = ((points >= bounds[:2]) & (points <= bounds[2:])).all(1)
+            if inside.sum() >= 16:
+                self.subject = bounds
 
     async def background_image_async(self, image, people):
         h, w = image.shape[:2]
@@ -97,7 +115,7 @@ class Background(Prepared):
         src = xy[[m.queryIdx for m in pairs]]
         dst = live[[m.trainIdx for m in pairs]]
         # 同款拱窗可能有很相似的描述子，学习特征需要更多分散的内点。
-        return self.projective(src, dst, size, tolerance, scale_limit, learned=True)
+        return self.projective(src, dst, size, tolerance, scale_limit, learned=True, flipped=flip)
 
     learned_match = synchronous(learned_match_async)
 
@@ -105,13 +123,22 @@ class Background(Prepared):
         if not self.usable:
             return None
         gray, mask = await self.background_image_async(image, people)
+        if self._scene is not None:
+            tracked = self._scene.measure(gray, mask, tolerance, scale_limit)
+            if tracked is not None:
+                if tracked["zoom"] is None:
+                    tracked = await self.recover_scale_async(gray, mask, tracked, tolerance, scale_limit)
+                return tracked | {"sceneLocked": True, "anchorId": self._anchor_serial}
+            # 丢失后先隐藏，不能立即跳到一次新的跨图估计上。
+            self._scene = None
+            self._reacquire = None
         observed = self.features(gray, mask)
         h, w = image.shape[:2]
         size = np.float32([w, h])
         direct = self.match(self.reference, observed, size, tolerance, scale_limit)
         if direct and direct["quad"] is not None and direct["inliers"] >= 18:
-            return direct
-        flipped = self.match(self.flipped, observed, size, tolerance, scale_limit)
+            return self.lock_scene(gray, mask, direct)
+        flipped = self.match(self.flipped, observed, size, tolerance, scale_limit, flipped=True)
         if not direct and (not flipped or flipped["inliers"] < 9):
             observed = await xfeat_features_async(gray, mask)
             direct = await self.learned_match_async(observed, size, tolerance, scale_limit)
@@ -119,14 +146,56 @@ class Background(Prepared):
                 flipped = await self.learned_match_async(observed, size, tolerance, scale_limit, flip=True)
         baseline = direct["inliers"] if direct else 0
         if flipped and flipped["inliers"] >= max(9, baseline * 1.65 + 2):
+            self._reacquire = None
             return flipped | {"ok": False, "tracking": False, "centerOk": False, "anchors": [],
                               "control": "mirror", "mode": "coarse",
                               "message": "两边的固定背景左右相反，可以水平翻转参考照"}
-        return direct
+        return self.lock_scene(gray, mask, direct)
 
     measure = synchronous(measure_async)
 
-    def match(self, reference, observed, size, tolerance=CENTER_TOLERANCE, scale_limit=SCALE_TOLERANCE):
+    async def recover_scale_async(self, gray, mask, tracked, tolerance, scale_limit):
+        # 初次局部匹配可能只确定了中心。补足景别证据时只补倍率，不能换锚点。
+        scene = self._scene
+        scene.scale_checks += 1
+        if scene.scale_checks % 4 != 1:
+            return tracked
+        observed = self.features(gray, mask)
+        candidate = self.match(self.reference, observed, scene.size, tolerance, scale_limit)
+        if not candidate or candidate["zoom"] is None:
+            observed = await xfeat_features_async(gray, mask)
+            candidate = await self.learned_match_async(observed, scene.size, tolerance, scale_limit)
+        return scene.accept_scale(candidate, tracked, tolerance, scale_limit)
+
+    def lock_scene(self, gray, mask, result):
+        if not result or not result["tracking"]:
+            self._reacquire = None
+            return result
+        if result.get("trackingQuad") is None and result["quad"] is None:
+            return result | {"tracking": False, "ok": False, "centerOk": False, "sceneLocked": False}
+        if self._had_anchor:
+            candidate = self._reacquire
+            self._reacquire = result
+            aspect = gray.shape[1] / gray.shape[0]
+            distance = (np.asarray(result["current"]) - np.asarray(candidate["current"])) * [aspect, 1.] if candidate else None
+            consistent = candidate and np.linalg.norm(distance) / min(aspect, 1.) < .035
+            if not consistent:
+                return result | {"ok": False, "tracking": False, "centerOk": False,
+                                 "sceneLocked": False, "control": "reacquire", "mode": "search",
+                                 "message": "正在找回同一处景物，请稍稳住镜头"}
+        scene = SceneAnchor.create(gray, mask, result)
+        if scene is None:
+            # 无法建立连续跟踪时明确等待，而不是显示一个每帧更换的落点。
+            return result | {"ok": False, "tracking": False, "centerOk": False,
+                             "sceneLocked": False, "control": "reacquire", "mode": "search",
+                             "message": "请让有清晰纹理的固定景物入镜，以便锁定目标点"}
+        self._scene = scene
+        self._reacquire = None
+        self._had_anchor = True
+        self._anchor_serial += 1
+        return result | {"sceneLocked": True, "anchorId": self._anchor_serial}
+
+    def match(self, reference, observed, size, tolerance=CENTER_TOLERANCE, scale_limit=SCALE_TOLERANCE, flipped=False):
         reference_xy, reference_desc = reference
         xy, desc = observed
         if min(len(reference_xy), len(xy)) < 8:
@@ -142,7 +211,7 @@ class Background(Prepared):
         src, dst = distinct_pairs(src, dst, size)
         if len(src) < 8:
             return None
-        result = self.projective(src, dst, size, tolerance, scale_limit)
+        result = self.projective(src, dst, size, tolerance, scale_limit, flipped=flipped)
         if result is not None:
             return result
         # 匹配集中在一侧时，用通过内点和分布检验的相似变换估计取景中心。
@@ -161,9 +230,9 @@ class Background(Prepared):
         if not .35 < scale < 3 or abs(roll) > 35:
             return None
         return self.alignment(np.vstack((matrix, [0., 0., 1.])), src[valid], dst[valid],
-                              size, tolerance, scale_limit, local=True)
+                              size, tolerance, scale_limit, local=True, flipped=flipped)
 
-    def projective(self, src, dst, size, tolerance, scale_limit, learned=False):
+    def projective(self, src, dst, size, tolerance, scale_limit, learned=False, flipped=False):
         if learned:
             src, dst = distinct_pairs(src, dst, size)
             if len(src) < MIN_LEARNED_INLIERS:
@@ -182,9 +251,16 @@ class Background(Prepared):
         spread = min(np.ptp(p, axis=0).min() for p in (ref_hits, live_hits))
         if coverage < (.04 if learned else .023) or spread < .13:
             return None
-        return self.alignment(transform, ref_hits, live_hits, size, tolerance, scale_limit)
+        return self.alignment(transform, ref_hits, live_hits, size, tolerance, scale_limit, flipped=flipped)
 
-    def alignment(self, transform, ref_hits, live_hits, size, tolerance, scale_limit, local=False):
+    def alignment(self, transform, ref_hits, live_hits, size, tolerance, scale_limit, local=False, flipped=False):
+        if self.subject is not None:
+            subject_hits = ref_hits.copy()
+            if flipped:
+                subject_hits[:, 0] = 1 - subject_hits[:, 0]
+            inside = ((subject_hits >= self.subject[:2]) & (subject_hits <= self.subject[2:])).all(1)
+            if inside.sum() < 4:
+                return None
         markers = np.vstack((FRAME, FRAME_CENTER, self.landmarks))
         projected = cv2.perspectiveTransform((markers * size)[None], transform)[0] / size
         quad, point = projected[:4], projected[4]
@@ -200,7 +276,119 @@ class Background(Prepared):
             near_live = np.linalg.norm((live_hits - live) * size, axis=1)
             if np.any((near_ref < .12 * min(size)) & (near_live < .16 * min(size))):
                 anchors.append({"id": i, "current": live.tolist()})
-        return result | {"anchors": anchors}
+        return result | {"anchors": anchors, "trackingQuad": quad.tolist()}
+
+
+class SceneAnchor:
+    """把首次确认的中心钉在一张固定关键帧上，而非每次跨图匹配都换落点。
+
+    后续光流始终回到同一关键帧核验，避免逐帧累乘造成漂移。只使用人物之外
+    的角点，并要求双向光流、分散内点和重投影同时通过；失效交回重新定锚。
+    """
+    @classmethod
+    def create(cls, gray, mask, result):
+        if not hasattr(cv2, "calcOpticalFlowPyrLK"):
+            return None
+        points = cv2.goodFeaturesToTrack(gray, maxCorners=180, qualityLevel=.015,
+                                        minDistance=max(7, min(gray.shape)*.025), mask=mask, blockSize=5)
+        if points is None or len(points) < 16:
+            return None
+        self = cls()
+        self.gray = gray.copy()
+        self.points = points.astype(np.float32)
+        self.predicted = self.points.copy()
+        self.base = result
+        self.local = result["quad"] is None
+        self.relative_zoom = None
+        self.scale_checks = 0
+        self.matrix = np.eye(3)
+        self.size = np.float32([gray.shape[1], gray.shape[0]])
+        self.markers = np.float32([*(result.get("trackingQuad") or result["quad"]), result["current"],
+                                  *[a["current"] for a in result["anchors"]]])
+        return self
+
+    def measure(self, gray, mask, tolerance, scale_limit):
+        if gray.shape != self.gray.shape:
+            return None
+        parameters = dict(winSize=(25, 25), maxLevel=3,
+                          criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 24, .015),
+                          flags=cv2.OPTFLOW_USE_INITIAL_FLOW)
+        try:
+            moved, forward, error = cv2.calcOpticalFlowPyrLK(self.gray, gray, self.points, self.predicted.copy(), **parameters)
+            if moved is None or forward is None:
+                return None
+            returned, backward, _ = cv2.calcOpticalFlowPyrLK(gray, self.gray, moved, self.points.copy(), **parameters)
+        except cv2.error:
+            return None
+        if returned is None or backward is None:
+            return None
+        src, dst = self.points.reshape(-1, 2), moved.reshape(-1, 2)
+        finite = np.isfinite(dst).all(1)
+        valid = finite & forward.ravel().astype(bool) & backward.ravel().astype(bool)
+        valid &= np.linalg.norm(returned.reshape(-1, 2) - src, axis=1) < .9
+        valid &= error.ravel() < 24
+        pixels = np.rint(np.where(np.isfinite(dst), dst, 0)).astype(int)
+        inside = (pixels >= 0).all(1) & (pixels < self.size).all(1)
+        valid &= inside
+        valid[inside] &= mask[pixels[inside, 1], pixels[inside, 0]] != 0
+        if valid.sum() < max(14, .22*len(src)):
+            return None
+        src, dst = src[valid], dst[valid]
+        matrix, keep = cv2.findHomography(src, dst, cv2.RANSAC, 1.7, maxIters=700, confidence=.995)
+        if matrix is None or keep is None:
+            return None
+        keep = keep.ravel().astype(bool)
+        if keep.sum() < max(12, .65*len(src)):
+            return None
+        src, dst = src[keep], dst[keep]
+        for points in (src/self.size, dst/self.size):
+            if cv2.contourArea(cv2.convexHull(points)) < .025 or np.ptp(points, axis=0).min() < .13:
+                return None
+        residual = np.linalg.norm(cv2.perspectiveTransform(src[None], matrix)[0]-dst, axis=1)
+        if np.median(residual) > .65:
+            return None
+        markers = cv2.perspectiveTransform((self.markers*self.size)[None], matrix)[0]/self.size
+        if (not np.isfinite(markers).all() or not cv2.isContourConvex(markers[:4]) or
+                not .035 < cv2.contourArea(markers[:4], oriented=True) < 3.2 or np.abs(markers[:5]).max() > 3):
+            return None
+        old = cv2.perspectiveTransform((self.markers*self.size)[None], self.matrix)[0]/self.size
+        # 不追逐亚像素光流噪声；真实的平移、旋转、变焦仍由整组标记的位移触发。
+        movement = np.linalg.norm((markers[:5]-old[:5])*self.size, axis=1).max()
+        if movement < .7:
+            matrix, markers = self.matrix, old
+        else:
+            self.matrix = matrix
+        self.predicted = cv2.perspectiveTransform(self.points, matrix)
+        measured = landmark_scale(src/self.size, dst/self.size, self.size)
+        self.relative_zoom = measured
+        zoom = self.base["zoom"] * measured if self.base["zoom"] is not None and measured is not None else None
+        result = frame_error(markers[:4], markers[4], self.size[0]/self.size[1], len(src), zoom,
+                             tolerance, scale_limit, local=self.local)
+        # 如无运动，锁定的倍率也不跟随光流数值噪声变化。
+        if movement < .7 and hasattr(self, "last_zoom"):
+            result = frame_error(markers[:4], markers[4], self.size[0]/self.size[1], len(src), self.last_zoom,
+                                 tolerance, scale_limit, local=self.local)
+        self.last_zoom = result["zoom"]
+        anchors = [{"id": a["id"], "current": p.tolist()} for a, p in zip(self.base["anchors"], markers[5:])]
+        return result | {"anchors": anchors, "trackingQuad": markers[:4].tolist()}
+
+    def accept_scale(self, candidate, tracked, tolerance, scale_limit):
+        if not candidate or not candidate["tracking"] or candidate["zoom"] is None or self.relative_zoom is None:
+            return tracked
+        candidate_quad = candidate.get("trackingQuad") or candidate["quad"]
+        if candidate_quad is None:
+            return tracked
+        points = np.float32([*candidate_quad, candidate["current"]])
+        anchored = np.float32([*tracked["trackingQuad"], tracked["current"]])
+        if np.max(np.linalg.norm((points-anchored)*self.size, axis=1)) > .035*min(self.size):
+            return tracked
+        recovered = frame_error(anchored[:4], anchored[4], self.size[0]/self.size[1], tracked["inliers"],
+                                candidate["zoom"], tolerance, scale_limit, local=self.local)
+        if recovered["zoom"] is None:
+            return tracked
+        self.base = self.base | {"zoom": candidate["zoom"]/self.relative_zoom}
+        self.last_zoom = recovered["zoom"]
+        return tracked | recovered
 
 
 def distinct_pairs(src, dst, size):

@@ -1,0 +1,16 @@
+{
+  "name": "campus-photo-guide-app",
+  "version": "1.0.2",
+  "private": true,
+  "description": "校园人像导拍 Android 安装包",
+  "scripts": {
+    "sync": "cap sync android"
+  },
+  "dependencies": {
+    "@capacitor/android": "8.6.2",
+    "@capacitor/core": "8.6.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.6.2"
+  }
+}

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path name="shared_photos" path="shared_photos/" />
+    <!-- Preserve Capacitor's optional file-picker camera capture without exposing all storage. -->
+    <external-files-path name="captured_photos" path="Pictures/" />
+</paths>

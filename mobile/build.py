@@ -13,7 +13,7 @@ from vendor import CACHE, ROOT, digest, fetch
 
 OUT = ROOT / "build" / "mobile"
 MOBILE = ROOT / "mobile"
-SHARED = ("inference", "guide", "people", "posture", "background", "outline", "building", "landmarks")
+SHARED = ("inference", "guide", "people", "posture", "background", "background_shapes", "outline", "building", "landmarks")
 
 
 def build():

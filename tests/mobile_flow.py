@@ -110,7 +110,7 @@ def main():
                 page.locator("#live-file").set_input_files(upload(options.photo))
             expect(page.locator("#source-state")).to_have_text("相机取景" if camera else "照片试拍")
             if options.tower:
-                expect(page.locator("#legend")).to_have_attribute("data-background", "outline")
+                expect(page.locator("#legend")).to_have_attribute("data-background", "outline", timeout=60000)
             expect(page.locator("#shutter")).to_be_enabled(timeout=150000)
             page.locator("#shutter").click()
             expect(page.locator("#export")).to_be_visible(timeout=60000)
@@ -122,7 +122,33 @@ def main():
                     assert output.size == photo.size
                 else:
                     assert abs((output.width / output.height) / (photo.width / photo.height) - 1) < .003
-            print("Offline", "camera" if camera else "photo", "guidance, all three gates and JPEG capture passed", flush=True)
+            print("Offline", "camera" if camera else "photo", "guidance, all four gates and JPEG capture passed", flush=True)
+            # Exercise an actual zoom offline, not just an already matching same-size image.
+            wide = Image.new("RGB", photo.size, (37,52,45))
+            small = photo.resize((round(photo.width*.70), round(photo.height*.70)), Image.Resampling.LANCZOS)
+            wide.paste(small, ((photo.width-small.width)//2, (photo.height-small.height)//2))
+            wide_bytes = io.BytesIO()
+            wide.save(wide_bytes, "JPEG", quality=95)
+            page.evaluate("""() => {
+              window.framingReplay=[]; window.recordFraming=true;
+              const record=()=>{
+                if (!window.recordFraming) return;
+                if (window.framingReplay.length<10000) window.framingReplay.push({
+                  phase:document.querySelector('#overlay').dataset.framing,
+                  zoom:Number(document.querySelector('#zoom').value)});
+                requestAnimationFrame(record);
+              }; record();
+            }""")
+            page.locator("#live-file").set_input_files({"name":"wide.jpg", "mimeType":"image/jpeg", "buffer":wide_bytes.getvalue()})
+            expect(page.locator("#source-state")).to_contain_text("照片试拍")
+            expect(page.locator("#shutter")).to_be_enabled(timeout=150000)
+            replay = page.evaluate("window.recordFraming=false; window.framingReplay")
+            phases = list(dict.fromkeys(item["phase"] for item in replay if item.get("phase") in ("outline", "scan", "zoom", "verify")))
+            assert phases == ["outline", "scan", "zoom", "verify"], phases
+            assert all(abs(item["zoom"]-1)<.001 for item in replay if item.get("phase") in ("outline", "scan"))
+            assert len({round(item["zoom"], 2) for item in replay if item.get("phase") == "zoom" and 1.01<item["zoom"]<1.4}) >= 4
+            assert 1.38 < float(page.locator("#zoom").input_value()) < 1.48
+            print("Offline background outline, scan effect, smooth zoom and fresh verification passed", flush=True)
             if options.other:
                 page.locator("#live-file").set_input_files(upload(options.other))
                 expect(page.locator("#source-state")).to_have_text("照片试拍")
@@ -132,13 +158,13 @@ def main():
             page.locator("#live-file").set_input_files(upload(options.photo))
             expect(page.locator("#source-state")).to_have_text("照片试拍")
             expect(page.locator("#live-photo")).to_have_js_property("complete", True)
-            for stage in ("机位", "站位", "姿势"):
+            for stage in ("对准", "景别", "站位", "姿势"):
                 btn = page.locator("#skip-stage")
                 expect(btn).to_have_text("跳过" + stage)
                 btn.click()
             expect(page.locator("#hint")).to_contain_text("跳过全部", timeout=60000)
             page.locator("#restore-steps").click()
-            expect(page.locator("#skip-stage")).to_have_text("跳过机位")
+            expect(page.locator("#skip-stage")).to_have_text("跳过对准")
             assert not unexpected, unexpected
             assert not errors, errors
             print("Offline source change, stage skipping and restore passed; no API or third-party requests", flush=True)

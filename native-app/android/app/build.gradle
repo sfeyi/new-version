@@ -1,0 +1,62 @@
+apply plugin: 'com.android.application'
+
+// Keep the local testing key outside source control; retain it for APK upgrades.
+def signingFile = rootProject.file('../../build/android-signing/signing.properties')
+def localSigning = new Properties()
+if (signingFile.exists()) signingFile.withInputStream { localSigning.load(it) }
+
+android {
+    namespace = "cn.campus.photoguide"
+    compileSdk = rootProject.ext.compileSdkVersion
+    buildToolsVersion '36.0.0'
+    defaultConfig {
+        applicationId "cn.campus.photoguide"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 3
+        versionName "1.0.2"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    signingConfigs {
+        localTest {
+            if (signingFile.exists()) {
+                storeFile new File(signingFile.parentFile, localSigning.getProperty('storeFile'))
+                storePassword localSigning.getProperty('storePassword')
+                keyAlias localSigning.getProperty('keyAlias')
+                keyPassword localSigning.getProperty('keyPassword')
+            }
+        }
+    }
+    buildTypes {
+        release {
+            if (signingFile.exists()) signingConfig signingConfigs.localTest
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'

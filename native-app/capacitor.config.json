@@ -1,0 +1,13 @@
+{
+  "appId": "cn.campus.photoguide",
+  "appName": "校园人像导拍",
+  "webDir": "../build/android-web",
+  "server": {
+    "hostname": "localhost",
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": false,
+    "webContentsDebuggingEnabled": false
+  }
+}

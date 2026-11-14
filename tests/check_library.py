@@ -1,4 +1,4 @@
-"""在本机用每张参考照自身作为输入，检查建模和三个阈值，不需要上传图片。"""
+"""在本机用每张参考照自身作为输入，检查建模和四个阈值，不需要上传图片。"""
 import argparse
 import hashlib
 from collections import Counter
@@ -32,13 +32,14 @@ def main():
         outline = guide.reference["outline"]
         if outline:
             counts[outline["kind"] + "_outlines"] += 1
-        bg, position, pose = result["checks"]
+        aim, bg, position, pose = result["checks"]
+        counts["aim"] += aim
         counts["background"] += bg
         counts["position"] += position
         counts["pose"] += pose
-        counts["all_three"] += bg and position and pose
+        counts["all_four"] += aim and bg and position and pose
         if not all(result["checks"]):
-            print(path.stem, dict(zip(("background", "position", "pose"), result["checks"])))
+            print(path.stem, dict(zip(("background", "framing", "position", "pose"), result["checks"])))
     print(dict(counts))
 
 

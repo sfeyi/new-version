@@ -1,19 +1,42 @@
 const gold = "#ffcf69";
 const mint = "#53f2c8";
 const white = "#fffdf8";
+const cyan = "#81e5ff";
+const red = "#ff444f";
+const staticLayers = new WeakMap();
+const nativePreview = !!document.querySelector('meta[name="guide-native"][content="android"]');
 
 function drawing(canvas) {
   const w = canvas.clientWidth, h = canvas.clientHeight;
   if (!w || !h) return null;
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  canvas.width = Math.round(w * dpr);
-  canvas.height = Math.round(h * dpr);
+  // Camera pixels keep their original resolution; only the transparent guide layer is cheaper.
+  const dpr = Math.min(window.devicePixelRatio || 1, nativePreview && canvas.id === "overlay" ? 1 : 2);
+  if (canvas.width !== Math.round(w*dpr) || canvas.height !== Math.round(h*dpr)) {
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+  }
   const ctx = canvas.getContext("2d");
-  ctx.scale(dpr, dpr);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.lineCap = ctx.lineJoin = "round";
-  return {ctx, w, h, point: ([x, y]) => [x * w, y * h]};
+  return {ctx, canvas, dpr, w, h, point: ([x, y]) => [x * w, y * h]};
 }
 
+function staticLayer(d, key, kind, paint) {
+  let cached = staticLayers.get(d.canvas);
+  if (!cached || cached.key !== key || cached.kind !== kind || cached.w !== d.canvas.width || cached.h !== d.canvas.height) {
+    const layer = document.createElement("canvas");
+    layer.width = d.canvas.width; layer.height = d.canvas.height;
+    const ctx = layer.getContext("2d");
+    ctx.setTransform(d.dpr,0,0,d.dpr,0,0);
+    ctx.lineCap = ctx.lineJoin = "round";
+    paint({...d,ctx});
+    cached = {key,kind,w:layer.width,h:layer.height,layer};
+    staticLayers.set(d.canvas,cached);
+  }
+  d.ctx.drawImage(cached.layer,0,0,d.w,d.h);
+}
 function path(d, points, color, width = 2, dash = []) {
   if (!points.length) return;
   const c = d.ctx;
@@ -75,13 +98,22 @@ function referenceJoints(d, points, edges) {
 
 function standingBox(d, box) {
   const [x, y, r, b] = box;
-  d.ctx.fillStyle = "#ffcf6914";
+  d.ctx.fillStyle = "#ff444f0a";
   d.ctx.fillRect(x*d.w, y*d.h, (r-x)*d.w, (b-y)*d.h);
-  path(d, [[x,y], [r,y], [r,b], [x,b], [x,y]], gold, 2, [7, 5]);
+  path(d, [[x,y], [r,y], [r,b], [x,b], [x,y]], red, 2.4);
 }
 
 function poseOutline(d, outline) {
   d.ctx.save();
+  d.ctx.beginPath();
+  for (const contour of outline.contours) {
+    if (!contour.length) continue;
+    d.ctx.moveTo(...d.point(contour[0]));
+    for (const p of contour.slice(1)) d.ctx.lineTo(...d.point(p));
+    d.ctx.closePath();
+  }
+  d.ctx.fillStyle = "#fffdf822";
+  d.ctx.fill("evenodd");
   d.ctx.shadowColor = "#142322cc";
   d.ctx.shadowBlur = 3;
   for (const contour of outline.contours) path(d, [...contour, contour[0]], white, 2);
@@ -90,10 +122,41 @@ function poseOutline(d, outline) {
 }
 
 function buildingOutline(d, outline) {
-  // 始终使用参考画幅的位置；拍摄者能直接看见金线下方的实际建筑。
+  // 只在景别步骤出现，固定在参考构图上，不能跟着实时建筑一起移动。
   for (const stroke of outline.paths) {
     path(d, stroke, "#18251fdf", 3.8);
-    path(d, stroke, gold, 2);
+    path(d, stroke, cyan, 1.8);
+  }
+  for (const stroke of outline.details || []) path(d, stroke, "#81e5ffbd", 1.1);
+}
+
+function framingOutline(d, ref, background, visual) {
+  const c = d.ctx;
+  c.save();
+  const reveal = visual?.reveal ?? 1;
+  if (reveal < 1) {
+    c.beginPath(); c.rect(0, 0, d.w, d.h*reveal); c.clip();
+  }
+  if (ref.buildingOutline || ref.backgroundOutline?.paths?.length) staticLayer(d,ref,"background", layer => {
+    for (const stroke of ref.backgroundOutline?.paths || []) {
+      path(layer, stroke, "#142c2999", 2.6);
+      path(layer, stroke, ref.buildingOutline ? "#b5edfa99" : "#b5edfadd", 1.2);
+    }
+    if (ref.buildingOutline) buildingOutline(layer, ref.buildingOutline);
+  });
+  else
+    landmarkMarkers(d, ref.landmarks, background?.tracking ? background.anchors : []);
+  c.restore();
+  if (visual?.scan != null) {
+    const y = visual.scan*d.h;
+    c.save();
+    const glow = c.createLinearGradient(0, y-32, 0, y+8);
+    glow.addColorStop(0, "#81e5ff00");
+    glow.addColorStop(.8, "#81e5ff38");
+    glow.addColorStop(1, "#81e5ff00");
+    c.fillStyle = glow; c.fillRect(0, y-32, d.w, 40);
+    path(d, [[0,visual.scan], [1,visual.scan]], "#c4f8ffb0", 1.5);
+    c.restore();
   }
 }
 
@@ -124,59 +187,96 @@ function landmarkMarkers(d, landmarks = [], anchors = []) {
   ctx.restore();
 }
 
-function backgroundRings(d, background, reference) {
-  landmarkMarkers(d, reference.landmarks, background?.tracking ? background.anchors : []);
+function backgroundRings(d, background, aim) {
   const target = [.5, .5];
-  const radius = reference.centerTolerance * Math.min(d.w, d.h);
-  const current = background?.tracking ? background.current : null;
+  const radius = Math.max(10, Math.min(17, .028 * Math.min(d.w, d.h)));
+  const current = aim ? aim.point : background?.tracking ? background.current : null;
+  d.ctx.save();
   d.ctx.shadowColor = "#10211dc9";
   d.ctx.shadowBlur = 3;
-  circle(d, target, radius, "#ffcf691b", true);
   if (current) {
+    d.ctx.globalAlpha = aim?.opacity ?? 1;
     const [dx, dy] = [current[0] - target[0], current[1] - target[1]];
     if (current.every(v => v >= 0 && v <= 1)) {
       if (Math.hypot(dx*d.w, dy*d.h) > radius*2) {
-        path(d, [target, current], "#ffffffad", 1.5, [4, 5]);
+        path(d, [target, current], "#ffffff50", 1, [3, 6]);
       }
-      circle(d, current, Math.max(4, Math.min(12, radius * .45)), mint);
-      circle(d, current, 2.4, mint, true);
+      circle(d, current, Math.max(5, radius * .48), white, true);
     } else {
       // 参考中心落在画外时，只指向它所在的一侧。
       const t = Math.min((.5 - 12/d.w) / Math.abs(dx), (.5 - 12/d.h) / Math.abs(dy));
       const end = [target[0] + t*dx, target[1] + t*dy];
       const length = Math.hypot(dx*d.w, dy*d.h);
-      arrow(d, [end[0] - 26*dx/length, end[1] - 26*dy/length], end, mint);
+      arrow(d, [end[0] - 26*dx/length, end[1] - 26*dy/length], end, white);
     }
   }
-  circle(d, target, radius, gold);
-  for (const sign of [-1, 1]) {
-    const inner = sign*(radius + 2), outer = sign*(radius + 8);
-    path(d, [[.5+inner/d.w,.5], [.5+outer/d.w,.5]], gold);
-    path(d, [[.5,.5+inner/d.h], [.5,.5+outer/d.h]], gold);
+  d.ctx.globalAlpha = 1;
+  circle(d, target, radius, white);
+  if (aim?.near) {
+    d.ctx.shadowColor = white;
+    d.ctx.shadowBlur = 10;
+    circle(d, target, radius+3, "#ffffff42");
+    const [x, y] = d.point(target);
+    d.ctx.beginPath();
+    d.ctx.arc(x, y, radius+3, -Math.PI/2, -Math.PI/2+Math.PI*2*Math.max(.035, aim.progress));
+    d.ctx.lineWidth = 3;
+    d.ctx.strokeStyle = white;
+    d.ctx.stroke();
   }
-  d.ctx.shadowBlur = 0;
+  d.ctx.restore();
+}
+
+function alignedPulse(d, progress) {
+  if (progress == null) return;
+  const c = d.ctx, target = [.5, .5];
+  const radius = Math.max(19, Math.min(28, .055*Math.min(d.w, d.h)));
+  const pulse = Math.sin(Math.min(1, progress/.42)*Math.PI);
+  c.save();
+  c.globalAlpha = Math.min(1, (1-progress)/.35);
+  c.shadowColor = gold;
+  c.shadowBlur = 18 + 12*pulse;
+  circle(d, target, radius*(1+.22*pulse), gold);
+  circle(d, target, radius*(.48+.10*pulse), gold, true);
+  c.shadowBlur = 2;
+  c.shadowColor = "#142322";
+  c.font = "600 13px system-ui, sans-serif";
+  c.textAlign = "center";
+  c.fillStyle = white;
+  c.fillText("中心已锁定", d.w/2, d.h/2+radius+25);
+  c.restore();
 }
 
 export function drawReference(canvas, ref, stage) {
   const d = drawing(canvas);
   if (!d || !ref) return;
-  if (stage === "background") {
-    if (ref.buildingOutline) buildingOutline(d, ref.buildingOutline);
-    else landmarkMarkers(d, ref.landmarks);
+  if (!stage || stage === "background") {
+    d.ctx.shadowColor = "#10211d";
+    d.ctx.shadowBlur = 4;
+    circle(d, ref.aimPoint || [.5, .5], Math.max(5, Math.min(d.w, d.h)*.024), white, true);
+    d.ctx.shadowBlur = 0;
+    return;
+  }
+  if (stage === "framing") {
+    framingOutline(d, ref, null, null);
+    return;
+  }
+  if (stage === "position") {
+    if (ref.box) standingBox(d, ref.box);
     return;
   }
   for (const box of ref.boxes) corners(d, box, "#ffffff9c");
   if (ref.box) corners(d, ref.box, gold);
-  if (ref.outline) poseOutline(d, ref.outline);
+  if (ref.outline) staticLayer(d,ref.outline,"pose", layer => poseOutline(layer, ref.outline));
   else referenceJoints(d, ref.points, ref.edges);
 }
 
-export function drawGuide(canvas, result, ref, stage = result?.stage) {
-  const d = drawing(canvas);
-  if (!d || !ref) return;
+function drawStage(d, result, ref, stage, aim, framing) {
   if (stage === "background") {
-    if (ref.buildingOutline) buildingOutline(d, ref.buildingOutline);
-    else backgroundRings(d, result?.background, ref);
+    backgroundRings(d, result?.background, aim);
+    return;
+  }
+  if (stage === "framing") {
+    framingOutline(d, ref, result?.background, framing);
     return;
   }
   if (result && result.boxes.length > 1) {
@@ -186,7 +286,7 @@ export function drawGuide(canvas, result, ref, stage = result?.stage) {
   if (result?.selected && (stage === "position" || stage === "ready" || result.boxes.length > 1))
     corners(d, result.selected, mint);
   if (stage !== "pose") return;
-  if (ref.outline) poseOutline(d, ref.outline);
+  if (ref.outline) staticLayer(d,ref.outline,"pose", layer => poseOutline(layer, ref.outline));
   else referenceJoints(d, ref.points, ref.edges);
   const pose = result?.pose;
   if (!pose) return;
@@ -201,5 +301,12 @@ export function drawGuide(canvas, result, ref, stage = result?.stage) {
     circle(d, current, 3.5, mint, true);
     arrow(d, current, goal, mint);
   }
+}
+
+export function drawGuide(canvas, result, ref, stage = result?.stage, aim = null, framing = null) {
+  const d = drawing(canvas);
+  if (!d || !ref) return;
+  drawStage(d, result, ref, stage, aim, framing);
+  alignedPulse(d, aim?.success);
 }
 

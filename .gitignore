@@ -1,6 +1,14 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.pytest_tmp/
 .venv/
 build/
 .mobile-cache/
+node_modules/
+native-app/android/.gradle/
+native-app/android/.kotlin/
+native-app/android/local.properties
+native-app/android/**/build/
+*.jks
+*.keystore

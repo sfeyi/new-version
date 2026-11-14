@@ -1,4 +1,4 @@
-"""从一张参考照提取可用来复拍的塔楼天际线，全程使用参考画幅坐标。"""
+"""提取塔楼、桥梁和建筑主体的轮廓及少量结构线，全部固定在参考画幅。"""
 from functools import lru_cache
 from pathlib import Path
 
@@ -9,6 +9,7 @@ from inference import infer, ort, synchronous
 
 # ADE20K 的类别编号。孤立的塔有时整体被分到普通建筑类。
 BUILDING, SKY, PERSON, HOUSE, SIGN, HIGH_RISE, TOWER, CLOCK = 1, 2, 12, 25, 43, 48, 84, 148
+WALL, WINDOW, RAILING, COLUMN, BRIDGE = 0, 8, 38, 42, 61
 
 
 @lru_cache(maxsize=1)
@@ -31,10 +32,98 @@ async def reference_building_async(image, people, scene_hint=""):
     h, w = image.shape[:2]
     name = next((word for word in ("钟楼", "灯塔", "圆塔") if word in scene_hint), "")
     # 即使有地点标注，仍需在照片中找到足够清晰、分布合理的建筑边界。
-    return tower_outline(image, labels, logits.max(axis=0) - logits[TOWER], w / h, people, name)
+    tower = tower_outline(image, labels, logits.max(axis=0) - logits[TOWER], w / h, people, name)
+    return architectural_outline(image, labels, people, scene_hint, tower)
 
 
 reference_building = synchronous(reference_building_async)
+
+
+def architectural_outline(image, labels, people, hint="", tower=None):
+    """语义区域限定主体，长边和外沿表达结构；不把全图砖纹都描出来。"""
+    h, w = image.shape[:2]
+    classes = [BUILDING, HOUSE, HIGH_RISE, TOWER, CLOCK, BRIDGE, COLUMN]
+    bridge = bool(np.mean(labels == BRIDGE) > .025)
+    if bridge or ("桥" in hint and "钟楼" not in hint):
+        classes.append(RAILING)
+    semantic = np.uint8(np.isin(labels, classes))
+    # 一面无语义结构的墙或单独栏杆不足以作为标志建筑。
+    if tower is None and (semantic.mean() < .045 or
+                         np.mean(np.isin(labels, [BUILDING, HOUSE, HIGH_RISE, TOWER, BRIDGE, COLUMN])) < .025):
+        return None
+    if semantic.mean() > .06:
+        semantic |= np.uint8(np.isin(labels, [WALL, WINDOW]))
+    mask = cv2.resize(semantic, (w, h), interpolation=cv2.INTER_NEAREST)
+    blocked = cv2.resize(np.uint8(labels == PERSON), (w, h), interpolation=cv2.INTER_NEAREST)
+    for box in people:
+        x, y, r, b = np.rint(np.asarray(box[:4]) * [w, h, w, h]).astype(int)
+        cv2.rectangle(blocked, (max(0, x-3), max(0, y-3)), (min(w-1, r+3), min(h-1, b+3)), 1, -1)
+    blocked = cv2.dilate(blocked, np.ones((7, 7), np.uint8))
+    if tower:
+        xy = np.vstack(tower["paths"])
+        low, high = xy.min(0), xy.max(0)
+        region = np.zeros((h, w), np.uint8)
+        a, b = np.maximum(0, np.floor(low * [w, h] - 8)).astype(int)
+        c, d = np.minimum([w, h], np.ceil(high * [w, h] + 8)).astype(int)
+        region[b:d, a:c] = 1
+        mask &= region
+    else:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+        count, components, stats, _ = cv2.connectedComponentsWithStats(mask)
+        if count <= 1:
+            return None
+        idx = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        mask = np.uint8(components == idx)
+    ys, xs = np.nonzero(mask)
+    if not len(xs):
+        return tower
+    bounds = np.array([xs.min()/w, ys.min()/h, (xs.max()+1)/w, (ys.max()+1)/h])
+    tower_name = next((name for name in ("钟楼", "灯塔", "圆塔") if name in hint), "")
+    if tower is None and tower_name and (bounds[2]-bounds[0])*w > .85*(bounds[3]-bounds[1])*h:
+        # 标注为钟楼机位的栏杆照可能只有桥板，不能据地点名制造塔楼。
+        return None
+    mask[blocked != 0] = 0
+    paths = list(tower["paths"]) if tower else []
+    if not tower:
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        for contour in sorted(contours, key=cv2.contourArea, reverse=True)[:4]:
+            xy = contour.reshape(-1, 2)
+            # 切断画幅边界和人物遮挡处，避免把裁切框或人物框画成建筑外沿。
+            valid = (xy[:, 0] > 3) & (xy[:, 0] < w-4) & (xy[:, 1] > 3) & (xy[:, 1] < h-4)
+            valid &= blocked[xy[:, 1], xy[:, 0]] == 0
+            indices = np.flatnonzero(valid)
+            for group in np.split(indices, np.flatnonzero(np.diff(indices) > 1) + 1):
+                run = xy[group]
+                if len(run) < .055 * min(w, h):
+                    continue
+                simple = cv2.approxPolyDP(run, max(1.2, .003*min(w, h)), False).reshape(-1, 2)
+                if len(simple) >= 2:
+                    paths.append(np.round(simple / [w, h], 5).tolist())
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    smooth = cv2.GaussianBlur(gray, (0, 0), 1.2)
+    lines = cv2.createLineSegmentDetector().detect(smooth)[0]
+    details = []
+    if lines is not None:
+        for line in sorted(np.asarray(lines).reshape(-1, 4), key=lambda p: np.hypot(p[2]-p[0], p[3]-p[1]), reverse=True):
+            x, y, r, b = line
+            if np.hypot(r-x, b-y) < .075 * min(w, h):
+                break
+            samples = np.rint(np.linspace([x, y], [r, b], 16)).astype(int)
+            sx, sy = samples[:, 0].clip(0, w-1), samples[:, 1].clip(0, h-1)
+            if np.mean(mask[sy, sx]) < .90 or blocked[sy, sx].any():
+                continue
+            normalized = np.array([[x/w, y/h], [r/w, b/h]])
+            if any(np.linalg.norm(normalized.mean(0)-np.mean(old, 0)) < .018 for old in details):
+                continue
+            details.append(normalized.round(5).tolist())
+            if len(details) == 18:
+                break
+    if not paths and len(details) < 3:
+        return None
+    name = tower["name"] if tower else next((s for s in ("钟楼", "灯塔", "圆塔", "廊桥", "拱廊") if s in hint),
+                                             "桥梁" if bridge else "建筑")
+    return {"name": name, "kind": "tower" if tower else "architecture", "paths": paths[:16],
+            "details": details, "bounds": bounds.round(5).tolist()}
 
 
 def _path(points, shape, closed=False):

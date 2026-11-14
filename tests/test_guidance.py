@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import decode, get_models
-from background import Background, CENTER_TOLERANCE, FRAME, frame_error
+from background import Background, CENTER_RELEASE, CENTER_TOLERANCE, FRAME, frame_error
 from building import reference_building
 from guide import Guide
 from landmarks import landmark_scale, xfeat_features
@@ -118,6 +118,17 @@ def test_only_the_background_can_confirm_the_landmark():
     assert tracker.measure(bg, [box]) is None
 
 
+def test_mirrored_building_keeps_its_own_matching_evidence():
+    rng = np.random.default_rng(17)
+    image = np.full((480, 640, 3), 180, np.uint8)
+    image[40:440, 410:615] = cv2.GaussianBlur(rng.integers(0, 255, (400, 205, 3), np.uint8), (3, 3), .6)
+    tracker = Background(image, [])
+    tracker.set_subject({"bounds": [.63, .07, .97, .94]})
+    assert tracker.subject is not None
+    result = tracker.measure(cv2.flip(image, 1), [])
+    assert result and result["control"] == "mirror" and not result["ok"]
+
+
 def test_large_portrait_preserves_side_background_and_detects_reflected_only_in_background():
     rng = np.random.default_rng(12)
     shape = (480, 360)
@@ -168,8 +179,7 @@ def test_local_matches_on_either_side_project_the_same_reference_center():
 
 @pytest.fixture(scope="module")
 def campus_photo():
-    library = Path(__file__).resolve().parents[2] / "校园摄影参考库_队友分享_98张"
-    photo = next(library.rglob("REF_011.webp"), None)
+    photo = next(Path(__file__).resolve().parents[2].glob("校园摄影*/**/REF_011.webp"), None)
     if photo is None:
         pytest.skip("需要共享参考库中的 REF_011.webp")
     return decode(photo.read_bytes())
@@ -181,15 +191,22 @@ def test_real_campus_landmark_coarse_fine_and_loss(campus_photo):
     guide = Guide(get_models(), f, "拱廊正面")
     shifts = [(.18, 0, "coarse", "向右转"), (.11, 0, "fine", "向右转"),
               (-.11, 0, "fine", "向左转"), (0, .10, "fine", "向下俯"), (0, -.10, "fine", "向上仰")]
-    for seq, (dx, dy, mode, cue) in enumerate(shifts):
+    seq = 0
+    for dx, dy, mode, cue in shifts:
         mat = np.float32([[1,0,w*dx],[0,1,h*dy]])
         moved = cv2.warpAffine(f, mat, (w,h))
-        res = guide.analyze(moved, seq, 1 + .2*seq)
+        # 跳切到另一侧时，景物锚点允许先失配，再用连续观测确认同一处位置。
+        for _ in range(3):
+            res = guide.analyze(moved, seq, 1 + .2*seq)
+            seq += 1
+            assert not res["ready"]
+            if res["background"] and res["background"]["tracking"]:
+                break
         assert res["stage"] == "background" and res["mode"] == mode
         assert cue in res["message"]
         assert res["background"]["target"] == [.5, .5]
         np.testing.assert_allclose(res["background"]["current"], [.5+dx, .5+dy], atol=.006)
-    res = guide.analyze(np.zeros_like(f), len(shifts), 2.)
+    res = guide.analyze(np.zeros_like(f), seq, 1 + .2*seq)
     assert res["mode"] == "search" and "拱廊正面" in res["message"] and not res["ready"]
 
 
@@ -197,10 +214,134 @@ def test_near_alignment_advances_and_small_camera_jitter_keeps_standing(campus_p
     guide = Guide(get_models(), campus_photo)
     assert guide.reference["outline"]["contours"] and guide.reference["centerTolerance"] == CENTER_TOLERANCE
     h, w = campus_photo.shape[:2]
-    for seq, dx in enumerate([.067, .067, .067, .091, .12]):
+    for seq, dx in enumerate([.067, .067, .067, .067, .067, .091, .12]):
         live = cv2.warpAffine(campus_photo, np.float32([[1,0,dx*w],[0,1,0]]), (w,h))
         step = guide.analyze(live, seq, seq*.20)
-        assert step["stage"] == ["background","background","position","position","background"][seq]
+        assert step["stage"] == ["background","background","framing","framing","position","position","position"][seq]
+        if seq >= 2:
+            assert step["completed"] == ["background"] and step["checks"][0]
+
+
+@pytest.fixture
+def measured_background(campus_photo, monkeypatch):
+    """Script valid geometry observations while retaining the real guide and person checks."""
+    def create(samples):
+        guide = Guide(get_models(), campus_photo)
+        observations = iter(samples)
+        thresholds = []
+
+        async def measure(image, boxes, tolerance, scale_limit):
+            thresholds.append(tolerance)
+            sample = next(observations)
+            if sample is None:
+                return None
+            mirrored = sample == "mirror"
+            distance, zoom, roll = (0., 1., 0.) if mirrored else sample
+            point = np.array([.5 + distance * min(guide.aspect, 1.) / guide.aspect, .5])
+            quad = np.float32((FRAME - .5) * zoom + point)
+            result = frame_error(quad, point, guide.aspect, 30, zoom, tolerance, scale_limit)
+            result["roll"] = roll
+            result["anchors"] = []
+            if mirrored:
+                result.update(ok=False, centerOk=False, tracking=False, control="mirror")
+            return result
+
+        monkeypatch.setattr(guide.background, "measure_async", measure)
+        return guide, thresholds
+    return create
+
+
+def test_center_hold_tolerates_boundary_jitter_and_independent_scale_noise(campus_photo, measured_background):
+    guide, thresholds = measured_background([(.079, .70, -6.), (.091, .90, 6.), (.099, .72, 0.)])
+    for seq, now in enumerate((0., .16, .34)):
+        result = guide.analyze(campus_photo, seq, now)
+        assert result["background"]["centerOk"]
+        assert "zoomFactor" not in result["background"]
+        assert not result["ready"]
+    assert result["stage"] == "framing" and not result["checks"][1]
+    assert thresholds == [CENTER_TOLERANCE, CENTER_RELEASE, CENTER_RELEASE]
+
+
+@pytest.mark.parametrize("invalid", [None, "mirror", (.101, 1., 0.)])
+def test_center_capture_must_reenter_after_loss_mirror_or_exit(campus_photo, measured_background, invalid):
+    guide, thresholds = measured_background([(.09, 1., 0.), (.079, 1., 0.), invalid,
+                                             (.09, 1., 0.), (.079, 1., 0.), (.09, 1., 0.)])
+    first = guide.analyze(campus_photo, 0, 0.)
+    assert first["stage"] == "background" and not first["checks"][0]
+    assert guide.analyze(campus_photo, 1, .2)["checks"][0]
+    lost = guide.analyze(campus_photo, 2, .4)
+    assert lost["stage"] == "background" and not lost["checks"][0] and not lost["ready"]
+    outside_entry = guide.analyze(campus_photo, 3, .6)
+    assert not outside_entry["checks"][0]
+    assert guide.analyze(campus_photo, 4, .8)["stage"] == "background"
+    assert guide.analyze(campus_photo, 5, 1.15)["stage"] == "framing"
+    assert thresholds[0] == thresholds[3] == CENTER_TOLERANCE
+
+
+def test_center_confirmation_needs_fresh_frames_and_resets_after_pause(campus_photo, measured_background):
+    guide, _ = measured_background([(0., 1., 0.)] * 4)
+    assert guide.analyze(campus_photo, 0, 0.)["stage"] == "background"
+    with pytest.raises(ValueError):
+        guide.analyze(campus_photo, 0, .5)
+    assert guide.analyze(campus_photo, 1, .2)["stage"] == "background"
+    assert guide.analyze(campus_photo, 2, 2.)["stage"] == "background"
+    # A slow but continuous camera can confirm using its next observation.
+    assert guide.analyze(campus_photo, 3, 2.5)["stage"] == "framing"
+
+
+def test_confirmed_center_survives_drift_loss_pause_and_zoom(campus_photo, measured_background):
+    guide, _ = measured_background([(0., 1., 0.), (0., 1., 0.), (.24, 1., 0.),
+                                     None, None, (.23, .70, 0.), (.25, .70, 0.)])
+    assert guide.analyze(campus_photo, 0, 0.)["completed"] == []
+    confirmed = guide.analyze(campus_photo, 1, .4)
+    assert confirmed["stage"] == "framing" and confirmed["completed"] == ["background"]
+    drifting = guide.analyze(campus_photo, 2, .8)
+    assert drifting["stage"] == "position" and drifting["checks"][:2] == [True, True]
+    assert not drifting["background"]["centerOk"]
+    for seq, now in ((3, 1.), (4, 3.)):
+        lost = guide.analyze(campus_photo, seq, now)
+        assert lost["stage"] == "framing" and lost["completed"] == ["background"]
+        assert lost["checks"][:2] == [True, False] and not lost["ready"]
+        assert "白点" not in lost["message"] and "中心环" not in lost["message"]
+    guide.analyze(campus_photo, 5, 3.2)
+    zooming = guide.analyze(campus_photo, 6, 3.6)
+    assert zooming["stage"] == "framing" and zooming["completed"] == ["background"]
+    assert not zooming["background"]["centerOk"]
+    assert zooming["background"]["zoomFactor"] == pytest.approx(1/.70, abs=.001)
+
+
+@pytest.mark.parametrize("gap, stage", [(2.2, "framing"), (3.6, "background")])
+def test_phone_sampling_can_confirm_slow_pairs_but_not_a_long_pause(campus_photo, measured_background, gap, stage):
+    guide, _ = measured_background([(0., 1., 0.)] * 2)
+    guide.max_sample_gap = 3.5
+    assert guide.analyze(campus_photo, 0, 0.)["stage"] == "background"
+    assert guide.analyze(campus_photo, 1, gap)["stage"] == stage
+
+
+def test_center_completion_resets_only_for_new_source_not_unskipping(campus_photo, measured_background):
+    guide, _ = measured_background([(0., 1., 0.), (0., 1., 0.), None,
+                                     None, (.09, 1., 0.), (.079, 1., 0.), (.079, 1., 0.)])
+    guide.analyze(campus_photo, 0, 0., source_id=1)
+    assert guide.analyze(campus_photo, 1, .4, source_id=1)["completed"] == ["background"]
+    skip = guide.analyze(campus_photo, 2, .6, skipped=["framing"], source_id=1)
+    assert skip["completed"] == ["background"] and skip["stage"] == "position"
+    restore = guide.analyze(campus_photo, 3, .8, skipped=[], source_id=1)
+    assert restore["completed"] == ["background"] and restore["stage"] == "framing"
+    restart = guide.analyze(campus_photo, 4, 1., source_id=2)
+    assert restart["completed"] == [] and restart["stage"] == "background" and not restart["checks"][0]
+    assert guide.analyze(campus_photo, 5, 1.2, source_id=2)["stage"] == "background"
+    again = guide.analyze(campus_photo, 6, 1.6, source_id=2)
+    assert again["completed"] == ["background"] and again["stage"] == "framing"
+
+
+def test_skipping_center_does_not_report_completion_and_framing_is_independent(campus_photo, measured_background):
+    guide, _ = measured_background([(.25, 1., 0.), (.25, 1., 0.), (.25, 1., 0.)])
+    first = guide.analyze(campus_photo, 0, 0., skipped=["background"])
+    assert first["completed"] == [] and first["checks"][:2] == [None, True]
+    second = guide.analyze(campus_photo, 1, .4, skipped=["background"])
+    assert second["stage"] == "position" and second["completed"] == []
+    restored = guide.analyze(campus_photo, 2, .8, skipped=[])
+    assert restored["stage"] == "background" and restored["completed"] == [] and not restored["checks"][0]
 
 
 def test_landmark_spacing_needs_distant_pairs_in_agreement():
@@ -226,20 +367,37 @@ def test_aim_before_zoom_and_verify_the_changed_framing(campus_photo):
             target = np.array(guide.reference["landmarks"][anchor["id"]])
             np.testing.assert_allclose(anchor["current"], .7*(target-.5)+[.66,.5], atol=.008)
         assert bg["anchors"]
-    # 圆心一度进入金圈，但镜头在金圈里继续移动，需要重新稳定。
+    # 中心在容差内即可通过第一关；景别仍需稳定后才能发出变焦命令。
     for seq, (time, dx) in enumerate(((.55, 0.), (.79, .06), (.96, .06)), 2):
         bg = guide.analyze(view(.7, dx), seq, time)["background"]
         assert bg["centerOk"] and not bg["scaleOk"] and "zoomFactor" not in bg
+    assert guide.stage == 1
     result = guide.analyze(view(.70, .06), 5, 1.16)
+    assert result["stage"] == "framing" and result["checks"][0] and not result["checks"][1]
     assert result["background"]["zoomFactor"] == pytest.approx(1/.70, abs=.015)
-    assert result["stage"] == "background" and not result["checks"][0]
     # 请求变焦之后收到旧景别，仍不能进入站位。真正变化后的帧再核验。
-    assert guide.analyze(view(.70, .06), 6, 1.4)["stage"] == "background"
-    assert guide.analyze(campus_photo, 7, 1.6)["stage"] == "background"
-    assert guide.analyze(campus_photo, 8, 2.)["stage"] == "position"
-    assert guide.analyze(view(1.15), 9, 2.2)["checks"][0]
-    assert guide.analyze(view(1.28), 10, 2.4)["stage"] == "background"
-    restarted = guide.analyze(view(1.28), 11, 2.75, source_id=2)
+    command = guide.analyze(view(.70, .06), 6, 1.4)
+    assert command["stage"] == "framing"
+    assert command["background"]["zoomFactor"] == pytest.approx(1/.70, abs=.015)
+    assert guide.analyze(campus_photo, 7, 1.6)["stage"] == "framing"
+    # 大幅数字变焦可能使光流失配；先重新确认景物，再对新景别累计稳定时间。
+    seq, now = 8, 2.
+    for _ in range(4):
+        aligned = guide.analyze(campus_photo, seq, now)
+        seq, now = seq + 1, now + .4
+        assert aligned["stage"] != "background" and aligned["completed"] == ["background"]
+        if aligned["stage"] == "position":
+            break
+    assert aligned["stage"] == "position" and aligned["checks"][1]
+    for _ in range(3):
+        slight = guide.analyze(view(1.15), seq, now)
+        seq, now = seq + 1, now + .2
+        if slight["background"]:
+            break
+    assert slight["checks"][1]
+    too_close = guide.analyze(view(1.28), seq, now)
+    assert too_close["stage"] == "framing" and not too_close["ready"]
+    restarted = guide.analyze(view(1.28), seq + 1, now + .35, source_id=2)
     assert "zoomFactor" not in restarted["background"]
 
 
@@ -308,29 +466,31 @@ def test_each_stage_can_be_skipped_during_loss_and_restored(campus_photo):
     guide = Guide(get_models(), campus_photo)
     blank = np.zeros_like(campus_photo)
     step = guide.analyze(blank, 0, 0., skipped=["background"])
-    assert step["stage"] == "position" and step["checks"] == [None, False, False]
-    step = guide.analyze(blank, 1, .2, skipped=["background", "position"])
+    assert step["stage"] == "framing" and step["checks"] == [None, False, False, False]
+    step = guide.analyze(blank, 1, .2, skipped=["background", "framing"])
+    assert step["stage"] == "position" and step["checks"] == [None, None, False, False]
+    step = guide.analyze(blank, 2, .4, skipped=["background", "framing", "position"])
     assert step["stage"] == "pose" and "姿势" in step["message"]
-    step = guide.analyze(blank, 2, .4, skipped=["position", "background", "pose"])
-    assert step["ready"] and step["checks"] == [None, None, None]
-    assert step["skipped"] == ["background", "position", "pose"]
+    step = guide.analyze(blank, 3, .6, skipped=["position", "background", "framing", "pose"])
+    assert step["ready"] and step["checks"] == [None, None, None, None]
+    assert step["skipped"] == ["background", "framing", "position", "pose"]
     with pytest.raises(ValueError, match="过期"):
         guide.analyze(blank, 1, .5, skipped=[])
-    assert guide.analyze(blank, 3, 3., tap=[.4, .5])["ready"]
+    assert guide.analyze(blank, 4, 3., tap=[.4, .5])["ready"]
     with pytest.raises(ValueError, match="可跳过"):
-        guide.analyze(blank, 4, 3.2, skipped=["ready"])
-    step = guide.analyze(blank, 4, 3.2, skipped=[])
+        guide.analyze(blank, 5, 3.2, skipped=["ready"])
+    step = guide.analyze(blank, 5, 3.2, skipped=[])
     assert step["stage"] == "background" and step["skipped"] == [] and not step["ready"]
 
 
 def test_skipping_only_position_keeps_background_and_pose_gated(campus_photo):
     guide = Guide(get_models(), campus_photo)
-    for seq in range(7):
+    for seq in range(9):
         step = guide.analyze(campus_photo, seq, seq*.22, skipped=["position"])
         assert step["stage"] != "position"
-    assert step["ready"] and step["checks"] == [True, None, True]
-    lost = guide.analyze(np.zeros_like(campus_photo), 7, 1.54)
-    assert lost["stage"] == "background" and not lost["ready"]
+    assert step["ready"] and step["checks"] == [True, True, None, True]
+    lost = guide.analyze(np.zeros_like(campus_photo), 9, 1.98)
+    assert lost["stage"] == "framing" and lost["completed"] == ["background"] and not lost["ready"]
 
 
 def test_reference_without_a_detectable_subject_can_still_use_manual_capture():
@@ -338,30 +498,30 @@ def test_reference_without_a_detectable_subject_can_still_use_manual_capture():
     guide = Guide(get_models(), blank)
     assert guide.reference["box"] is None and guide.reference["subjectHint"]
     assert guide.analyze(blank, 0, 0.)["stage"] == "background"
-    result = guide.analyze(blank, 1, .2, skipped=["background"])
+    result = guide.analyze(blank, 1, .2, skipped=["background", "framing"])
     assert result["stage"] == "position" and not result["ready"] and "参考" in result["message"]
-    assert guide.analyze(blank, 2, .4, skipped=["background", "position", "pose"])["ready"]
+    assert guide.analyze(blank, 2, .4, skipped=["background", "framing", "position", "pose"])["ready"]
 
 
 def test_camera_ready_is_withdrawn_if_person_or_background_leaves(campus_photo):
     f = campus_photo
     guide = Guide(get_models(), f)
     stages = []
-    for seq in range(9):
+    for seq in range(10):
         result = guide.analyze(f, seq, seq*.22)
         stages.append(result["stage"])
-    assert list(dict.fromkeys(stages)) == ["background","position","pose","ready"]
+    assert list(dict.fromkeys(stages)) == ["background","framing","position","pose","ready"]
     assert result["ready"] and all(result["checks"])
     no_model = f.copy()
     h, w = f.shape[:2]
     x,y,r,b = np.rint(guide.target.reference.box[:4] * [w,h,w,h]).astype(int)
     cv2.rectangle(no_model, (x-5,y-5), (r+5,b+5), (92,95,80), -1)
-    result = guide.analyze(no_model, 9, 2.)
+    result = guide.analyze(no_model, 10, 2.2)
     assert result["stage"] == "position" and not result["ready"] and result["checks"][0]
-    result = guide.analyze(np.zeros_like(f), 10, 2.2)
-    assert result["stage"] == "background" and not result["ready"]
+    result = guide.analyze(np.zeros_like(f), 11, 2.4)
+    assert result["stage"] == "framing" and result["completed"] == ["background"] and not result["ready"]
     with pytest.raises(ValueError, match="过期"):
-        guide.analyze(f, 10, 2.4)
+        guide.analyze(f, 11, 2.6)
 
 def test_image_inference_finds_a_lowered_wrist_and_keeps_background_and_position():
     # 只改变手臂附近的原图像素。实际人体检测和姿态模型都走生产入口。
@@ -377,7 +537,7 @@ def test_image_inference_finds_a_lowered_wrist_and_keeps_background_and_position
     guide = Guide(get_models(), frame)
     for seq in range(7):
         result = guide.analyze(changed, seq, 3 + .24 * seq)
-    assert result["checks"] == [True, True, False] and result["stage"] == "pose"
+    assert result["checks"] == [True, True, True, False] and result["stage"] == "pose"
     assert result["pose"]["joint"] == 9 and "左手腕向画面上移" in result["message"]
     assert result["pose"]["actual"][9][1] - result["pose"]["target"][9][1] > .08
 
@@ -389,8 +549,8 @@ def test_two_independent_lawn_photos_share_landmark_but_need_different_stances()
         pytest.skip("需要共享参考库红椅机位的 REF_051、REF_052")
     reference, current = (decode(path.read_bytes()) for path in photos)
     guide = Guide(get_models(), reference)
-    for seq in range(4):
+    for seq in range(5):
         result = guide.analyze(current, seq, 5 + .2 * seq)
-    assert result["stage"] == "position" and result["checks"][:2] == [True, False]
+    assert result["stage"] == "position" and result["checks"][:3] == [True, True, False]
 
 

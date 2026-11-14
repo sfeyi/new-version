@@ -16,11 +16,13 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from guide import Guide
 from people import Models
+from library import api as library_api
 
 
 ROOT = Path(__file__).resolve().parent
 app = Flask(__name__, static_folder="static")
 app.config["MAX_CONTENT_LENGTH"] = 24 * 1024 * 1024
+app.register_blueprint(library_api)
 cv2.setNumThreads(2)
 sessions = {}
 storage_lock = Lock()
@@ -90,6 +92,12 @@ def index():
     return app.send_static_file("index.html")
 
 
+@app.get("/api/health")
+def health():
+    # Cheap identity check for the phone connection screen; no model load or image upload.
+    return jsonify(status="ok", service="campus-photo-guide", version=1)
+
+
 @app.post("/api/session")
 def start():
     file = request.files.get("reference")
@@ -104,6 +112,9 @@ def start():
         frame = cv2.flip(frame, 1)
     note = request.form.get("viewpoint", "").strip()[:100] or campus_notes().get(hashlib.sha256(data).hexdigest(), "")
     guide = Guide(get_models(), frame, note, point(request.form))
+    if request.form.get("client") == "android-preview":
+        # Low-frequency phone sampling is intentional; a slow fresh pair can still confirm alignment.
+        guide.max_sample_gap = 3.5
     sid = uuid4().hex
     now = time.monotonic()
     with storage_lock:
@@ -128,13 +139,22 @@ def analyze(sid):
     seq = request.args.get("seq", type=int)
     if seq is None or seq < 0:
         raise ValueError("缺少有效帧号。")
-    image = decode(request.get_data(cache=False))
+    payload = request.get_data(cache=False)
+    body_at = time.perf_counter()
+    image = decode(payload)
+    decoded_at = time.perf_counter()
     tap = point(request.args)
     skipped = request.args.get("skip")
     if skipped is not None:
         skipped = skipped.split(",") if skipped else []
     with guide.lock:
+        acquired_at = time.perf_counter()
         result = guide.analyze(image, seq, time.monotonic(), tap, skipped, request.args.get("source", type=int))
+    done_at = time.perf_counter()
+    result["timing"] = {"decodeMs": round((decoded_at-body_at)*1000, 1),
+                        "queueMs": round((acquired_at-decoded_at)*1000, 1),
+                        "analyzeMs": round((done_at-acquired_at)*1000, 1),
+                        "serverMs": round((done_at-body_at)*1000, 1)}
     return jsonify(result)
 
 
@@ -146,5 +166,5 @@ def stop(sid):
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=int(os.environ.get("PORT", "7861")), threaded=True)
+    app.run(host=os.environ.get("HOST", "127.0.0.1"), port=int(os.environ.get("PORT", "7861")), threaded=True)
 
