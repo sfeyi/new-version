@@ -53,7 +53,8 @@ def main():
             page=ctx.new_page();errors=[]
             page.on('pageerror',lambda e:errors.append(str(e)))
             page.goto(f'http://127.0.0.1:{site.server_port}/')
-            assert page.locator('#guide-mode').input_value()=='demo'
+            assert page.locator('#guide-mode').input_value()=='live'
+            page.locator('#guide-mode').select_option('demo')
             page.locator('#computer-server').fill(f'http://127.0.0.1:{computer.server_port}')
             page.locator('#computer-connect-button').click()
             expect(page.locator('#computer-status')).to_contain_text('已连接电脑')

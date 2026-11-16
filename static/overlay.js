@@ -134,9 +134,8 @@ function framingOutline(d, ref, background, visual) {
   const c = d.ctx;
   c.save();
   const reveal = visual?.reveal ?? 1;
-  if (reveal < 1) {
-    c.beginPath(); c.rect(0, 0, d.w, d.h*reveal); c.clip();
-  }
+  // The whole reference silhouette is useful immediately, before zoom starts.
+  c.globalAlpha = .35 + .65*Math.min(1,reveal*3);
   if (ref.buildingOutline || ref.backgroundOutline?.paths?.length) staticLayer(d,ref,"background", layer => {
     for (const stroke of ref.backgroundOutline?.paths || []) {
       path(layer, stroke, "#142c2999", 2.6);
@@ -242,7 +241,6 @@ function alignedPulse(d, progress) {
   c.font = "600 13px system-ui, sans-serif";
   c.textAlign = "center";
   c.fillStyle = white;
-  c.fillText("中心已锁定", d.w/2, d.h/2+radius+25);
   c.restore();
 }
 

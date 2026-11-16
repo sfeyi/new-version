@@ -69,6 +69,15 @@ CASES = """async () => {
   check(stages.update(hint('正在切换镜头',{key:'framing'}),5,{immediate:true})===null,'Identical urgent text was repainted');
   findings.stageAndUrgentImmediate=true;
 
+  const feedback=new HintPacer();
+  feedback.update(hint('保存失败，请重试',{key:'ready',mode:'error'}),0,{immediate:true});
+  for(const t of [1,200,1000,2499])
+    check(feedback.update(hint('可以拍摄',{key:'ready',mode:'ready'}),t)===null,'A repeated ready frame erased save feedback');
+  check(feedback.update(hint('可以拍摄',{key:'ready',mode:'ready'}),2500)?.mode==='ready','Ready hint never resumed');
+  feedback.update(hint('已保存到相册',{key:'ready'}),2600,{immediate:true});
+  check(feedback.update(hint('调整站位',{key:'position'}),2601)?.key==='position','Action feedback blocked a new stage');
+  findings.userFeedbackSurvivesRepeatedReady=true;
+
   // A reset discards candidates and an emitted object must not mutate internal state.
   const owned=new HintPacer();
   const input=hint('向右转'), before=JSON.stringify(input);

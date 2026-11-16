@@ -7,6 +7,9 @@ import {FramingSequence} from "./framing.js";
 import {nativeAndroid, saveNativePhoto, shareNativePhoto} from "./native-export.js";
 import {FrameSampler} from "./frame-sampler.js";
 import {DemoMarker} from "./demo.js";
+import {SceneMotion} from "./scene-motion.js";
+import {CameraZoom} from "./camera-zoom.js";
+import {FramingGlass} from "./framing-glass.js";
 
 const el = id => document.getElementById(id);
 const video = el("video"), livePhoto = el("live-photo"), refPhoto = el("reference");
@@ -27,6 +30,10 @@ let demoZoomPlayed = false;
 const demoMarker = new DemoMarker(el("demo-aim"), el("demo-dot"), () => {
   if (isDemo() && shownStage === "background") advanceDemo();
 });
+const sceneMotion = new SceneMotion(el("live-aim"),el("live-dot"));
+const lens = new CameraZoom(renderZoom);
+const glass = new FramingGlass(el("framing-glass"),el("framing-still"));
+let lastFrameBlob = null, pendingFramingZoom = null, framingGlassPlayed = false;
 let analysisPaused = false, networkPaused = false, nextAnalysisAt = 0;
 let measuredFrames = 0, lastMeasuredFrames = null, lastPreviewMeasure = 0, previewFrameRequest = null;
 let prepareMs = 0, requestMs = 0, serverMs = 0;
@@ -57,14 +64,17 @@ function paintOverlay(now = performance.now()) {
   const show = el("show-guides").checked;
   const demoAiming = isDemo() && shownStage === "background";
   demoMarker.show(demoAiming && !!reference && !!source && show && !analysisPaused && !document.hidden);
-  el("overlay").hidden = analysisPaused || !show || demoAiming;
+  const motionActive = nativeAndroid && !isDemo() && shownStage === "background" && !!reference && source === "camera" && !analysisPaused && !document.hidden;
+  sceneMotion.setActive(motionActive,motionActive && show);
+  const motionAiming = motionActive && sceneMotion.locked;
+  el("overlay").hidden = analysisPaused || !show || demoAiming || motionAiming || !reference;
   if (analysisPaused) {
     el("aim-transition").hidden = el("framing-status").hidden = el("legend").hidden = true;
     return;
   }
   const framingVisual = updateFraming(now);
   const visual = aim.sample(now);
-  if (show && !demoAiming) {
+  if (show && !demoAiming && !motionAiming && reference) {
     const started = performance.now();
     drawGuide(el("overlay"), latest, reference, shownStage, visual, framingVisual);
     overlayMs += performance.now()-started;
@@ -105,7 +115,7 @@ function scheduleOverlay(now = performance.now()) {
   clearTimeout(overlayWake);
   overlayWake = 0;
   if (document.hidden || !reference || !source || analysisPaused) return;
-  const motion = el("show-guides").checked ? aim.animation(now) : {active:false};
+  const motion = el("show-guides").checked && !(shownStage === "background" && sceneMotion.locked) ? aim.animation(now) : {active:false};
   // Zoom still advances with the guide layer hidden. Static rings/outlines do not animate.
   if (["outline", "scan", "zoom"].includes(framingSequence.phase) || motion.active) {
     if (!overlayRequest) overlayRequest = requestAnimationFrame(animateOverlay);
@@ -121,20 +131,42 @@ function renderOverlay() {
 }
 
 function setCameraZoom(value) {
-  cameraZoom = value;
-  el("zoom").value = String(value);
-  el("zoom-value").textContent = value.toFixed(2) + "×";
-  video.style.transform = livePhoto.style.transform = "scale(" + value + ")";
+  lens.set(value);
+}
+
+function renderZoom() {
+  cameraZoom = lens.value;
+  framingSequence.min = lens.min;
+  framingSequence.max = lens.max;
+  el("zoom").min = String(lens.min);
+  el("zoom").max = String(lens.max);
+  el("zoom").value = String(cameraZoom);
+  el("zoom-value").textContent = cameraZoom.toFixed(2) + "×";
+  el("zoom-kind").textContent = source === "camera" && lens.mode === "camera" ? "镜头变焦" : "画面放大";
+  video.style.transform = lens.digital === 1 ? "" : "scale(" + lens.digital + ")";
+  livePhoto.style.transform = "scale(" + cameraZoom + ")";
+  sceneMotion.configure(surface.clientWidth || 1,surface.clientHeight || 1,video.videoWidth,video.videoHeight,
+    reference ? reference.width/reference.height : (video.videoWidth/video.videoHeight || 4/3),
+    lens.hardware*lens.digital,facing === "user",reference?.centerTolerance || .08);
   const name = {camera:"相机取景", photo:"照片试拍"}[source] || "尚未取景";
-  el("source-state").textContent = value === 1 ? name : name + " · " + value.toFixed(2) + "×";
+  el("source-state").textContent = cameraZoom === 1 ? name : name + " · " + cameraZoom.toFixed(2) + "×";
 }
 
 function updateFraming(now = performance.now()) {
   let state = framingSequence.sample(now);
   if (isDemo() && shownStage === "framing" && state.phase === "adjust" && !demoZoomPlayed && el("auto-zoom").checked) {
     demoZoomPlayed = true;
-    framingSequence.beginZoom(cameraZoom, Math.min(1.6,cameraZoom*1.12), now);
+    framingSequence.beginZoom(cameraZoom, Math.min(lens.max,cameraZoom*1.12), now);
     state = framingSequence.sample(now);
+  }
+  if (!isDemo() && shownStage === "framing" && state.phase === "adjust" && pendingFramingZoom) {
+    const plan = pendingFramingZoom;
+    pendingFramingZoom = null;
+    if (el("auto-zoom").checked && now-plan.capturedAt <= 3500 && framingSequence.beginZoom(cameraZoom,plan.wanted,now)) {
+      generation++;latest=null;shotRequested=false;el("shutter").disabled=true;
+      tell("摄影者 · 匹配景别", "保持手机平稳，正在匹配参考轮廓大小");
+      state = framingSequence.sample(now);
+    }
   }
   if (state.zoom !== null && Math.abs(state.zoom-cameraZoom) > .00001) setCameraZoom(state.zoom);
   if (state.phase === "verify" && paintedFramingPhase === "zoom") {
@@ -157,24 +189,24 @@ function updateFraming(now = performance.now()) {
   return state;
 }
 
-function alignZoom(result) {
-  const factor = result.background?.zoomFactor;
-  if (result.stage !== "framing" || !factor || skipped.has("framing") || !el("auto-zoom").checked) return false;
-  const wanted = Math.max(1, Math.min(1.6, cameraZoom * factor));
+function planZoom(result, capturedZoom, capturedAt) {
+  const bg = result.background;
+  // The first accepted center already contains a measured scale. Save it through
+  // the contour/glass introduction instead of waiting for another network round trip.
+  const factor = bg?.zoomFactor || (result.completed?.includes("background") && bg?.tracking && !bg.scaleOk && bg.zoom > 0 ? 1/bg.zoom : null);
+  if (result.stage !== "framing" || !factor || !Number.isFinite(factor) || skipped.has("framing") || !el("auto-zoom").checked) return;
+  const wanted = Math.max(lens.min, Math.min(lens.max, capturedZoom * factor));
   if (Math.abs(wanted - cameraZoom) < .005) {
     if (source === "photo") {
       result.message = factor < 1 ? "这张试拍照取景太近，请换一张更广的照片，或跳过景别"
-        : "放大到 1.60× 后地标仍偏小，请换一张取景更近的照片，或跳过景别";
+        : "已达到可用倍率，地标仍偏小，请换一张取景更近的照片，或跳过景别";
     } else {
       result.message = factor < 1 ? "已到最广的 1×，请后退一些，让地标在画面中变小"
-        : "已放大到 1.60×，请向地标靠近一些";
+        : "已达到可用倍率，请向地标靠近一些";
     }
-    return false;
+    return;
   }
-  if (!framingSequence.beginZoom(cameraZoom, wanted, performance.now())) return false;
-  invalidate("framing", null, true);
-  tell("摄影者 · 匹配景别", "保持手机平稳，正在匹配参考景别");
-  return true;
+  pendingFramingZoom = {wanted,capturedAt};
 }
 
 function tell(who, message, mode = "", paced = false) {
@@ -212,7 +244,11 @@ function display(result, pendingStage) {
   shownStage = result?.stage ?? (reference && source ? pendingStage ?? stages.find(s => !skipped.has(s) && !completed.has(s)) : null);
   if (previousStage !== shownStage && shownStage === "framing") demoZoomPlayed = false;
   if (shownStage === "framing" && reference && source) framingSequence.enter(performance.now());
-  else {framingSequence.reset(); paintedFramingPhase = "idle";}
+  else {framingSequence.reset(); paintedFramingPhase = "idle";pendingFramingZoom=null;}
+  if (shownStage === "framing" && result?.completed?.includes("background") && !framingGlassPlayed) {
+    framingGlassPlayed = true;
+    if (el("show-guides").checked && !analysisPaused) glass.play(lastFrameBlob);
+  } else if (shownStage !== "framing") glass.clear();
   aim.update(result, performance.now());
   renderOverlay();
   if (previousStage !== shownStage) showReferenceGuide();
@@ -301,8 +337,12 @@ function invalidate(stage, tap = null, preserveFraming = false) {
   lastVideoTime = -1;
   const context = referenceVersion + ":" + sourceVersion;
   const preserve = context === guideContext;
-  if (!preserve || !preserveFraming) {framingSequence.reset(); paintedFramingPhase = "idle";}
-  if (!preserve) {completed.clear(); hints.reset(); demoMarker.reset(); demoZoomPlayed = false;}
+  if (!preserve || !preserveFraming) {framingSequence.reset(); paintedFramingPhase = "idle";lens.cancel();glass.clear();}
+  if (!preserve) {
+    completed.clear(); hints.reset(); demoMarker.reset(); demoZoomPlayed = false;
+    sceneMotion.reset();glass.clear();framingGlassPlayed=false;lastFrameBlob=null;
+  }
+  if (!preserve || !preserveFraming) pendingFramingZoom=null;
   guideContext = context;
   aim.reset(reference ? reference.width/reference.height : 1, preserve);
   display(isDemo() && reference && source ? demoFrame(stage || (preserve ? shownStage : null) || stages.find(s=>!skipped.has(s)&&!completed.has(s)) || "ready") : null, stage);
@@ -347,6 +387,8 @@ function layout() {
   const sourceRatio = source === "camera" ? video.videoWidth / video.videoHeight : livePhoto.naturalWidth / livePhoto.naturalHeight;
   fit(surface, el("viewport"), ratio || sourceRatio || 4/3);
   demoMarker.configure(surface.clientWidth || 1,surface.clientHeight || 1,ratio || sourceRatio || 4/3,facing === "user");
+  sceneMotion.configure(surface.clientWidth || 1,surface.clientHeight || 1,video.videoWidth,video.videoHeight,
+    ratio || sourceRatio || 4/3,lens.hardware*lens.digital,facing === "user",reference?.centerTolerance || .08);
   showReferenceGuide();
   renderOverlay();
 }
@@ -474,12 +516,14 @@ el("zoom").oninput = e => {
   if (!reference || !source) return;
   el("auto-zoom").checked = false;
   demoZoomPlayed = true;
+  pendingFramingZoom=null;glass.clear();
   framingSequence.cancelZoom();
   setCameraZoom(Number(e.target.value));
   invalidate("framing", null, true);
   tell("摄影者 · 调整景别", isDemo() ? "倍率已调整，景别合适后点击确认" : "倍率已调整，正在核对建筑轮廓");
 };
 el("auto-zoom").onchange = () => {
+  pendingFramingZoom=null;lens.cancel();glass.clear();
   if (isDemo()) demoZoomPlayed = !el("auto-zoom").checked;
   framingSequence.cancelZoom();
   invalidate("framing", null, true);
@@ -492,6 +536,7 @@ window.addEventListener("campus-server-changed", () => {
 });
 
 function stopTracks() {
+  lens.attach(null);sceneMotion.setActive(false,false);glass.clear();
   if (previewFrameRequest !== null) video.cancelVideoFrameCallback?.(previewFrameRequest);
   previewFrameRequest = null;
   if (stream) for (const track of stream.getTracks()) track.stop();
@@ -535,7 +580,7 @@ function showSource(kind) {
 
 async function startCamera() {
   if (cameraOpening !== null) return;
-  if (isDemo()) demoMarker.requestSensors();
+  demoMarker.requestSensors();
   if (!navigator.mediaDevices?.getUserMedia) {
     tell("相机", "请在 localhost 或 HTTPS 页面开启相机，也可以用照片试拍", "search");
     return;
@@ -549,10 +594,13 @@ async function startCamera() {
   try {
     const height = nativeAndroid ? Number(el("preview-quality").value) : 1080;
     const acquired = await navigator.mediaDevices.getUserMedia({
-      audio:false, video:{facingMode:{ideal:facing}, width:{ideal:height*16/9}, height:{ideal:height}, frameRate:{ideal:30, max:30}}
+      audio:false, video:{facingMode:{ideal:facing}, width:{ideal:height*16/9}, height:{ideal:height}, frameRate:{ideal:30, max:30},
+        // Request zoom access when supported; otherwise some browsers hide its range.
+        ...(navigator.mediaDevices.getSupportedConstraints?.().zoom ? {zoom:true} : {})}
     });
     if (version !== sourceVersion) {acquired.getTracks().forEach(t => t.stop()); return;}
     stream = acquired;
+    lens.attach(acquired.getVideoTracks()[0]);
     video.srcObject = acquired;
     await video.play();
     if (version !== sourceVersion) return;
@@ -605,7 +653,8 @@ function snapshot(maxEdge, reusable = null) {
   const input = source === "camera" ? video : livePhoto;
   const w = input.videoWidth || input.naturalWidth, h = input.videoHeight || input.naturalHeight;
   const ratio = reference.width / reference.height;
-  const cw = Math.min(w, h * ratio) / cameraZoom, ch = cw / ratio;
+  const zoom = source === "camera" ? lens.digital : cameraZoom;
+  const cw = Math.min(w, h * ratio) / zoom, ch = cw / ratio;
   const scale = Math.min(1, maxEdge / Math.max(cw, ch));
   const canvas = reusable || document.createElement("canvas");
   const width = Math.max(1, Math.round(cw * scale)), height = Math.max(1, Math.round(ch * scale));
@@ -632,19 +681,21 @@ function sampledShot(frozen) {
 async function analyze() {
   if (isDemo() || busy || !session || !source || document.hidden || analysisPaused) return;
   if (nativeAndroid && !shotRequested && !pendingTap && performance.now() < nextAnalysisAt) return;
-  if (updateFraming().blockAnalysis) return;
+  if (updateFraming().blockAnalysis || lens.busy) return;
   if (!shotRequested && source === "camera" && (video.readyState < 2 || video.currentTime === lastVideoTime)) return;
   if (source === "photo" && latest?.ready && !shotRequested && !pendingTap && performance.now() - lastAnalyzed < 650) return;
   const version = generation, id = session, tap = pendingTap, taking = shotRequested;
   shotRequested = false;
   busy = true;
   lastAnalysisStarted = performance.now();
+  const capturedMotion = sceneMotion.snapshot(lastAnalysisStarted);
+  const capturedZoom = source === "camera" ? lens.hardware*lens.digital : cameraZoom;
   if (nativeAndroid) nextAnalysisAt = lastAnalysisStarted + 1000;
   if (source === "camera") lastVideoTime = video.currentTime;
   try {
     // 快门请求分析和下载使用同一次采样，辅助线画在独立的 canvas 上。
     const prepared = nativeAndroid && source === "camera" && !taking
-      ? await sampler.capture(video, reference.width/reference.height, cameraZoom) : null;
+      ? await sampler.capture(video, reference.width/reference.height, lens.digital) : null;
     const blob = prepared?.blob || await jpeg(taking && nativeAndroid ? sampledShot(taking)
       : taking || snapshot(nativeAndroid ? 640 : 960, analysisCanvas), nativeAndroid ? .75 : taking ? .94 : .9);
     prepareMs = performance.now()-lastAnalysisStarted;
@@ -676,7 +727,9 @@ async function analyze() {
       flipReference(false);
       return;
     }
-    if (!taking && alignZoom(result)) return;
+    lastFrameBlob = blob;
+    sceneMotion.observe(result,capturedMotion);
+    if (!taking) planZoom(result,capturedZoom,lastAnalysisStarted);
     display(result);
     if (taking && result.ready) {
       const photo = nativeAndroid ? await jpeg(taking, .94) : blob;
@@ -772,6 +825,7 @@ el("guide-mode").onchange = () => {
   el("pause-analysis").setAttribute("aria-pressed","false");
   sampler.dispose();sampler = new FrameSampler();
   skipped.clear();completed.clear();demoMarker.reset();
+  sceneMotion.reset();glass.clear();pendingFramingZoom=null;
   updateDemoUI();
   // Reopen the stream to release any textures/readback work left by live sampling.
   if (source === "camera") startCamera();
@@ -785,12 +839,14 @@ function setAnalysisPaused(paused, disconnected = false) {
   el("pause-analysis").setAttribute("aria-pressed", String(analysisPaused));
   el("preview-status").textContent = analysisPaused ? "识别已暂停，预览继续" : "识别已恢复，最多每秒一次";
   framingSequence.cancelZoom();
+  lens.cancel();glass.clear();pendingFramingZoom=null;
   invalidate(undefined, null, true);
   nextAnalysisAt = performance.now()+300;
   tell("相机", disconnected ? "电脑连接已中断，已暂停导拍；相机预览继续" : analysisPaused ? "识别已暂停，当前只显示相机预览" : "识别已恢复，预览优先", "search");
 }
 el("pause-analysis").onclick = () => setAnalysisPaused(!analysisPaused);
 el("show-guides").onchange = () => {
+  if (!el("show-guides").checked) glass.clear();
   el("legend").hidden = !el("show-guides").checked || analysisPaused || !source || !reference || shownStage === "ready";
   renderOverlay();
 };
@@ -820,6 +876,7 @@ if (nativeAndroid) setInterval(() => {
     (isDemo() ? " · 演示模式 · 手动确认" : analysisPaused ? " · 识别已暂停" : " · 识别最多每秒一次");
   window.__guidePerformance = {previewFps:fps,prepareMs,requestMs,serverMs,completedAnalyses,worker:!!sampler.worker,busy,analysisPaused,
     samplingPath,sampleMainMs,sampleWorkerMs,sampleBytes,
+    zoomMode:lens.mode,hardwareZoom:lens.hardware,digitalZoom:lens.digital,motionAnchor:sceneMotion.locked,motionSensor:sceneMotion.domain,
     cameraSettings:stream?.getVideoTracks()[0]?.getSettings(),
     guidesVisible:el("show-guides").checked,overlayPaints,overlayMs,longTaskMs,mode:isDemo()?"demo":"live"};
   const details = el("performance-details");
@@ -830,6 +887,7 @@ if (nativeAndroid) setInterval(() => {
       `最近一次取样 ${Math.round(prepareMs)} ms（前端准备 ${Math.round(sampleMainMs)} ms，后台处理 ${Math.round(sampleWorkerMs)} ms）\n` +
       `请求往返 ${Math.round(requestMs)} ms · 电脑处理 ${Math.round(serverMs)} ms · 图片 ${(sampleBytes/1024).toFixed(0)} KB\n` +
       `处理路径 ${samplingPath} · 本秒界面长任务 ${Math.round(longTaskMs)} ms\n` +
+      `变焦 ${lens.mode} · 镜头 ${lens.hardware.toFixed(2)}× · 画面裁切 ${lens.digital.toFixed(2)}× · 方向 ${sceneMotion.domain || "不可用"}\n` +
       "往返减去电脑处理仍包含桥接、上传和下载，不等于纯 Wi-Fi 延迟。";
   }
   overlayPaints = overlayMs = longTaskMs = 0;
@@ -850,12 +908,12 @@ setInterval(() => {
 }, 110);
 
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) {cancelOverlay(); cancelCameraOpening(); framingSequence.cancelZoom(); invalidate(undefined, null, true);}
+  if (document.hidden) {cancelOverlay(); cancelCameraOpening(); framingSequence.cancelZoom();lens.cancel();glass.clear();pendingFramingZoom=null;invalidate(undefined, null, true);}
   else if (source === "camera" && stream && cameraOpening === null) {
     video.play().catch(() => tell("相机", "预览已暂停，请关闭后重新开启相机", "search"));
     renderOverlay();
   }
 });
-window.addEventListener("pagehide", () => {demoMarker.dispose();cancelOverlay(); sampler.dispose(); cancelCameraOpening(); releaseGuide(session); stopTracks();});
+window.addEventListener("pagehide", () => {sceneMotion.dispose();glass.clear();demoMarker.dispose();cancelOverlay(); sampler.dispose(); cancelCameraOpening(); releaseGuide(session); stopTracks();});
 window.addEventListener("pageshow", e => {if (e.persisted) location.reload();});
 

@@ -15,6 +15,7 @@ export class HintPacer {
     this.candidate = null;
     this.shownAt = null;
     this.lastUpdate = null;
+    this.protectedUntil = 0;
   }
 
   show(hint, now) {
@@ -33,8 +34,13 @@ export class HintPacer {
       this.candidate = null;
       return null;
     }
-    if (!this.current || hint.key !== this.current.key || immediate || urgentModes.has(mode))
+    // Save/share feedback from a user action must survive repeated "ready" frames.
+    if (!immediate && hint.key === this.current?.key && now < this.protectedUntil && !["error", "fatal"].includes(mode))
+      return null;
+    if (!this.current || hint.key !== this.current.key || immediate || urgentModes.has(mode)) {
+      this.protectedUntil = immediate ? now + MIN_DISPLAY_MS : 0;
       return this.show(hint, now);
+    }
     if (!this.candidate || !same(hint, this.candidate.hint)) this.candidate = {hint, since:now};
     if (now-this.shownAt >= MIN_DISPLAY_MS && now-this.candidate.since >= CANDIDATE_MS)
       return this.show(hint, now);

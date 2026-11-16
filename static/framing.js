@@ -6,7 +6,7 @@ const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
 const ease = t => t*t*(3-2*t);
 
 export class FramingSequence {
-  constructor() {this.reset();}
+  constructor() {this.min=1;this.max=1.6;this.reset();}
 
   reset() {
     this.entered = false;
@@ -34,8 +34,8 @@ export class FramingSequence {
     const state = this.sample(now);
     // Do not consume a new/stale scale command until the previous zoom was verified.
     if (state.phase !== "adjust") return false;
-    from = clamp(from, 1, 1.6);
-    to = clamp(to, 1, 1.6);
+    from = clamp(from, this.min, this.max);
+    to = clamp(to, this.min, this.max);
     if (Math.abs(to-from) < .0001) return false;
     this.from = from;
     this.to = to;
