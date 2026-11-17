@@ -18,6 +18,7 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 
@@ -38,7 +39,7 @@ public class PhotoExportPlugin extends Plugin {
             Uri photoUri = null;
             boolean published = false;
             try {
-                byte[] jpeg = readJpeg(call);
+                PhotoSource photo = readPhoto(call);
                 String filename = safeFilename(call.getString("filename"));
                 ContentValues values = new ContentValues();
                 values.put(MediaStore.Images.Media.DISPLAY_NAME, filename);
@@ -51,7 +52,7 @@ public class PhotoExportPlugin extends Plugin {
                 if (photoUri == null) throw new IOException("MediaStore insert failed");
                 try (OutputStream output = resolver.openOutputStream(photoUri, "w")) {
                     if (output == null) throw new IOException("Photo stream unavailable");
-                    output.write(jpeg);
+                    photo.write(output);
                 }
                 ContentValues completed = new ContentValues();
                 completed.put(MediaStore.Images.Media.IS_PENDING, 0);
@@ -80,7 +81,7 @@ public class PhotoExportPlugin extends Plugin {
         execute(() -> {
             File photoFile = null;
             try {
-                byte[] jpeg = readJpeg(call);
+                PhotoSource photo = readPhoto(call);
                 String filename = safeFilename(call.getString("filename"));
                 File directory = new File(getContext().getCacheDir(), "shared_photos");
                 if (!directory.isDirectory() && !directory.mkdirs()) {
@@ -89,7 +90,7 @@ public class PhotoExportPlugin extends Plugin {
                 removeExpiredShares(directory);
                 photoFile = File.createTempFile("photo-", ".jpg", directory);
                 try (OutputStream output = new FileOutputStream(photoFile)) {
-                    output.write(jpeg);
+                    photo.write(output);
                 }
                 Uri photoUri = FileProvider.getUriForFile(getContext(),
                     getContext().getPackageName() + ".photos", photoFile);
@@ -127,6 +128,26 @@ public class PhotoExportPlugin extends Plugin {
                 call.reject("准备分享失败，请检查手机剩余空间后重试。", "SHARE_FAILED");
             }
         });
+    }
+
+    private static final class PhotoSource {
+        final File file;
+        final byte[] bytes;
+        PhotoSource(File file, byte[] bytes) { this.file = file; this.bytes = bytes; }
+        void write(OutputStream output) throws IOException {
+            if (file == null) { output.write(bytes); return; }
+            // Original JPEG stays native; it is neither Base64-bridged nor recompressed.
+            try (FileInputStream input = new FileInputStream(file)) {
+                byte[] buffer = new byte[64 * 1024]; int count;
+                while ((count = input.read(buffer)) != -1) output.write(buffer,0,count);
+            }
+        }
+    }
+
+    private PhotoSource readPhoto(PluginCall call) throws IOException {
+        String id = call.getString("photoId");
+        if (id != null) return new PhotoSource(NativePhotoStore.get(getContext(),id),null);
+        return new PhotoSource(null,readJpeg(call));
     }
 
     private static byte[] readJpeg(PluginCall call) {

@@ -9,6 +9,7 @@ public class MainActivity extends BridgeActivity {
         // Register before BridgeActivity creates the bridge and its plugin headers.
         registerPlugin(PhotoExportPlugin.class);
         registerPlugin(MotionAnchorPlugin.class);
+        registerPlugin(NativeCameraPlugin.class);
         super.onCreate(savedInstanceState);
     }
 }

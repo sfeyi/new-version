@@ -6,6 +6,7 @@ export const nativeAndroid = document.querySelector('meta[name="guide-native"]')
 const photos = nativeAndroid ? globalThis.Capacitor.Plugins?.PhotoExport : null;
 
 async function payload(file) {
+  if(file?.nativePhotoId) return {photoId:file.nativePhotoId,filename:"campus-photo-"+Date.now()+".jpg"};
   if (!file || file.type !== "image/jpeg" || file.size > 24*1024*1024) throw new Error("请保存小于 24 MB 的 JPEG 照片");
   const data = await new Promise((resolve, reject) => {
     const reader = new FileReader();

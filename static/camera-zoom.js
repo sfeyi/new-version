@@ -8,6 +8,7 @@ export class CameraZoom {
     ++this.epoch;clearTimeout(this.timer);this.timer=0;this.inflight=false;
     this.track=track;this.cap=null;this.base=this.hardware=this.value=this.digital=1;
     this.min=1;this.max=1.6;this.settleUntil=0;this.cancelled=false;
+    if(track?.supportsDigitalCrop===false)this.max=1;
     try {
       const cap=track?.getCapabilities?.().zoom,base=track?.getSettings?.().zoom;
       if (cap && Number.isFinite(cap.min) && Number.isFinite(cap.max) && cap.max>cap.min && cap.min>0 && track.applyConstraints) {
@@ -45,6 +46,7 @@ export class CameraZoom {
       if (Number.isFinite(reported)&&reported>0) this.hardware=reported/this.base;
       this.cap=null;this.min=Math.max(1,this.hardware);this.max=Math.max(this.hardware,Math.min(8,this.hardware*1.6));
       this.value=clamp(this.value,this.min,this.max);this.digital=this.value/this.hardware;
+      if(track?.supportsDigitalCrop===false){this.min=this.max=this.value=this.hardware;this.digital=1;}
     } finally {
       if (epoch===this.epoch) {
         this.inflight=false;
@@ -60,5 +62,15 @@ export class CameraZoom {
     // An in-flight device command cannot be cancelled. Its latest requested value
     // is allowed to settle, then analysis uses the actual returned stream.
     if (!this.inflight) {this.value=this.hardware*this.digital;this.changed();}
+  }
+  refreshNative() {
+    if(this.track?.supportsDigitalCrop!==false || this.inflight)return;
+    const cap=this.track.getCapabilities().zoom,reported=this.track.getSettings().zoom;
+    if(!Number.isFinite(reported)||reported<=0)return;
+    clearTimeout(this.timer);this.timer=0;
+    this.cap=cap?.max>cap?.min?cap:null;
+    this.min=Math.max(1,(cap?.min||reported)/this.base);
+    this.max=Math.max(this.min,Math.min(8,(cap?.max||reported)/this.base));
+    this.value=this.hardware=reported/this.base;this.digital=1;this.changed();
   }
 }

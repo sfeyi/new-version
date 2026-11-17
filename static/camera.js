@@ -12,6 +12,7 @@ import {CameraZoom} from "./camera-zoom.js";
 import {FramingGlass} from "./framing-glass.js";
 import {phoneCamera, setupPhone} from './mobile-ui.js';
 import {encodeBlob} from './native-server.js';
+import {nativeCameraAvailable, nativeCamera} from './native-camera.js';
 
 const el = id => document.getElementById(id);
 const video = el("video"), livePhoto = el("live-photo"), refPhoto = el("reference");
@@ -27,6 +28,7 @@ let referenceVersion = 0, sourceVersion = 0, generation = 0;
 let cameraOpening = null;
 let sampler = new FrameSampler();
 if (!nativeAndroid) el("guide-mode").value = "live";
+if (nativeCameraAvailable) el('preview-quality').value='1080';
 const isDemo = () => nativeAndroid && el("guide-mode").value === "demo";
 let demoZoomPlayed = false;
 const demoMarker = new DemoMarker(el("demo-aim"), el("demo-dot"), () => {
@@ -53,6 +55,9 @@ const aim = new AimMotion();
 const hints = new HintPacer();
 const poseBudget = new PoseBudget();
 let phone = {sync(){},closeSheets(){},setPhase(){}};
+let nativeCapturing=false;
+let nativeBinding=null;
+const cameraSize=()=>nativeCameraAvailable ? [nativeCamera.info.width||0,nativeCamera.info.height||0] : [video.videoWidth,video.videoHeight];
 const framingSequence = new FramingSequence();
 let paintedFramingPhase = "idle";
 const completed = new Set();
@@ -149,7 +154,7 @@ function renderZoom() {
   el("zoom-kind").textContent = source === "camera" && lens.mode === "camera" ? "镜头变焦" : "画面放大";
   video.style.transform = lens.digital === 1 ? "" : "scale(" + lens.digital + ")";
   livePhoto.style.transform = "scale(" + cameraZoom + ")";
-  sceneMotion.configure(surface.clientWidth || 1,surface.clientHeight || 1,video.videoWidth,video.videoHeight,
+  sceneMotion.configure(surface.clientWidth || 1,surface.clientHeight || 1,...cameraSize(),
     captureAspect(),
     lens.hardware*lens.digital,facing === "user",reference?.centerTolerance || .08);
   const name = {camera:"相机取景", photo:"照片试拍"}[source] || "尚未取景";
@@ -159,7 +164,8 @@ function renderZoom() {
 
 function syncPhone() {
   phone.sync({source,stage:shownStage,zoom:cameraZoom,min:lens.min,max:lens.max,reference,poseRound:poseBudget.round,poseDone:poseBudget.done});
-  if(phoneCamera && source && !reference) el('shutter').disabled=false;
+  if(phoneCamera && source && !reference) el('shutter').disabled=nativeCapturing;
+  if(nativeCameraAvailable && source==='camera' && !nativeCamera.active)el('shutter').disabled=true;
 }
 
 function captureAspect() {
@@ -225,7 +231,7 @@ function planZoom(result, capturedZoom, capturedAt) {
 }
 
 function tell(who, message, mode = "", paced = false) {
-  const selected = hints.update({who, message:conciseHint(message,shownStage), mode, key:shownStage || "setup"}, performance.now(), {immediate:!paced});
+  const selected = hints.update({who, message:conciseHint(message,mode==='error'?'':shownStage), mode, key:shownStage || "setup"}, performance.now(), {immediate:!paced});
   applyHint(selected);
 }
 
@@ -282,7 +288,7 @@ function display(result, pendingStage) {
   });
   el("hold").hidden = !result || result.mode !== "hold";
   el("hold").value = result?.hold || 0;
-  el("shutter").disabled = !result?.ready || !!shotRequested;
+  el("shutter").disabled = !result?.ready || !!shotRequested || nativeCapturing;
   const skipButton = el("skip-stage");
   skipButton.hidden = index < 0 || shownStage === "ready";
   if (!skipButton.hidden) skipButton.textContent = "跳过" + stageNames[index];
@@ -406,11 +412,12 @@ function fit(element, parent, aspect) {
 function layout() {
   const ratio = refPhoto.naturalWidth / refPhoto.naturalHeight;
   if (ratio) fit(refSurface, el("ref-box"), ratio);
-  const sourceRatio = source === "camera" ? video.videoWidth / video.videoHeight : livePhoto.naturalWidth / livePhoto.naturalHeight;
+  const [cameraWidth,cameraHeight]=cameraSize();
+  const sourceRatio = source === "camera" ? cameraWidth / cameraHeight : livePhoto.naturalWidth / livePhoto.naturalHeight;
   if(phoneCamera) {surface.style.width=el('viewport').clientWidth+'px';surface.style.height=el('viewport').clientHeight+'px';}
   else fit(surface, el("viewport"), ratio || sourceRatio || 4/3);
   demoMarker.configure(surface.clientWidth || 1,surface.clientHeight || 1,ratio || sourceRatio || 4/3,facing === "user");
-  sceneMotion.configure(surface.clientWidth || 1,surface.clientHeight || 1,video.videoWidth,video.videoHeight,
+  sceneMotion.configure(surface.clientWidth || 1,surface.clientHeight || 1,...cameraSize(),
     captureAspect(),lens.hardware*lens.digital,facing === "user",reference?.centerTolerance || .08);
   showReferenceGuide();
   renderOverlay();
@@ -546,6 +553,7 @@ el("overlay").onclick = e => {
   pendingTap = positionIn(e);
   tell("主角", "正在确认点选的人物");
 };
+el('viewport').addEventListener('click',e=>{if(nativeCameraAvailable && source==='camera')nativeCamera.focus(positionIn(e));});
 
 el("zoom").oninput = e => {
   if (!source) return;
@@ -567,8 +575,8 @@ el("auto-zoom").onchange = () => {
 };
 const cancelLibrarySelection = setupLibrary((file, note) => loadReference(file, undefined, note), onDevice, async()=>{
   if(!source) await startCamera();
-  if(source!=='camera' || video.readyState<2) throw new Error('请先开启相机，朝向要拍摄的场景');
-  const prepared=await sampler.capture(video,captureAspect(),lens.digital);
+  if(source!=='camera' || (nativeCameraAvailable ? !nativeCamera.active : video.readyState<2)) throw new Error('请先开启相机，朝向要拍摄的场景');
+  const prepared=nativeCameraAvailable ? await nativeCamera.sample() : await sampler.capture(video,captureAspect(),lens.digital);
   if(!prepared?.blob) throw new Error('画面正在准备，请再试一次');
   return prepared.base64 || encodeBlob(prepared.blob);
 });
@@ -578,6 +586,7 @@ window.addEventListener("campus-server-changed", () => {
 });
 
 function stopTracks() {
+  if(!stream && nativeCameraAvailable)nativeCamera.stop();
   lens.attach(null);sceneMotion.setActive(false,false);glass.clear();
   if (previewFrameRequest !== null) video.cancelVideoFrameCallback?.(previewFrameRequest);
   previewFrameRequest = null;
@@ -612,7 +621,7 @@ function showSource(kind) {
   invalidate();
   surface.hidden = !kind;
   el("empty").hidden = !!kind;
-  video.hidden = kind !== "camera";
+  video.hidden = kind !== "camera" || nativeCameraAvailable;
   livePhoto.hidden = kind !== "photo";
   updateCameraControls();
   el("flip").hidden = kind !== "camera";
@@ -623,7 +632,7 @@ function showSource(kind) {
 async function startCamera() {
   if (cameraOpening !== null) return;
   demoMarker.requestSensors();
-  if (!navigator.mediaDevices?.getUserMedia) {
+  if (!nativeCameraAvailable && !navigator.mediaDevices?.getUserMedia) {
     tell("相机", "请在 localhost 或 HTTPS 页面开启相机，也可以用照片试拍", "search");
     return;
   }
@@ -635,16 +644,16 @@ async function startCamera() {
   tell("相机", "正在开启相机");
   try {
     const height = nativeAndroid ? Number(el("preview-quality").value) : 1080;
-    const acquired = await navigator.mediaDevices.getUserMedia({
+    const acquired = nativeCameraAvailable ? await nativeCamera.start({facing,previewHeight:height}) : await navigator.mediaDevices.getUserMedia({
       audio:false, video:{facingMode:{ideal:facing}, width:{ideal:height*16/9}, height:{ideal:height}, frameRate:{ideal:30, max:30},
         // Request zoom access when supported; otherwise some browsers hide its range.
         ...(navigator.mediaDevices.getSupportedConstraints?.().zoom ? {zoom:true} : {})}
     });
     if (version !== sourceVersion) {acquired.getTracks().forEach(t => t.stop()); return;}
     stream = acquired;
+    if(nativeCameraAvailable)nativeBinding=nativeCamera.info.binding;
     lens.attach(acquired.getVideoTracks()[0]);
-    video.srcObject = acquired;
-    await video.play();
+    if(!nativeCameraAvailable){video.srcObject = acquired;await video.play();}
     if (version !== sourceVersion) return;
     const track = acquired.getVideoTracks()[0];
     track.onended = () => {
@@ -655,7 +664,7 @@ async function startCamera() {
   } catch (error) {
     if (version !== sourceVersion) return;
     stopTracks(); showSource(null);
-    tell("相机", error.name === "NotAllowedError" ? (nativeAndroid ? "请在应用权限中允许相机，或用照片试拍" : "请允许浏览器使用摄像头，或用照片试拍") : "未能开启摄像头，可重新连接或用照片试拍", "search");
+    tell("相机", nativeCameraAvailable ? (error.message || "原生相机无法启动，请重试") : error.name === "NotAllowedError" ? (nativeAndroid ? "请在应用权限中允许相机，或用照片试拍" : "请允许浏览器使用摄像头，或用照片试拍") : "未能开启摄像头，可重新连接或用照片试拍", "search");
   } finally {
     cameraOpening = null;
     updateCameraControls();
@@ -692,6 +701,7 @@ el("live-file").onchange = async e => {
 };
 
 function snapshot(maxEdge, reusable = null) {
+  if(nativeCameraAvailable && source==='camera')throw new Error('原生相机拍照不能使用预览截帧');
   const input = source === "camera" ? video : livePhoto;
   const w = input.videoWidth || input.naturalWidth, h = input.videoHeight || input.naturalHeight;
   const ratio = captureAspect();
@@ -721,11 +731,12 @@ function sampledShot(frozen) {
 }
 
 async function analyze() {
-  if (isDemo() || poseBudget.done || busy || !session || !source || document.hidden || analysisPaused) return;
+  if (isDemo() || poseBudget.done || busy || nativeCapturing || !session || !source || document.hidden || analysisPaused) return;
   if(phoneCamera && document.body.dataset.phonePhase!=='guide') return;
   if (nativeAndroid && !shotRequested && !pendingTap && performance.now() < nextAnalysisAt) return;
   if (updateFraming().blockAnalysis || lens.busy) return;
-  if (!shotRequested && source === "camera" && (video.readyState < 2 || video.currentTime === lastVideoTime)) return;
+  if(source==='camera' && nativeCameraAvailable && !nativeCamera.active)return;
+  if (!nativeCameraAvailable && !shotRequested && source === "camera" && (video.readyState < 2 || video.currentTime === lastVideoTime)) return;
   if (source === "photo" && latest?.ready && !shotRequested && !pendingTap && performance.now() - lastAnalyzed < 650) return;
   const version = generation, id = session, tap = pendingTap, taking = shotRequested;
   shotRequested = false;
@@ -737,7 +748,7 @@ async function analyze() {
   if (source === "camera") lastVideoTime = video.currentTime;
   try {
     // 快门请求分析和下载使用同一次采样，辅助线画在独立的 canvas 上。
-    const prepared = nativeAndroid && source === "camera" && !taking
+    const prepared = nativeCameraAvailable && source === 'camera' ? await nativeCamera.sample() : nativeAndroid && source === "camera" && !taking
       ? await sampler.capture(video, captureAspect(), lens.digital) : null;
     const blob = prepared?.blob || await jpeg(taking && nativeAndroid ? sampledShot(taking)
       : taking || snapshot(nativeAndroid ? 640 : 960, analysisCanvas), nativeAndroid ? .75 : taking ? .94 : .9);
@@ -800,6 +811,7 @@ function exportShot(blob) {
   if (lastShotUrl) URL.revokeObjectURL(lastShotUrl);
   lastShotUrl = URL.createObjectURL(blob);
   lastShotFile = new File([blob], "校园人像-" + Date.now() + ".jpg", {type:"image/jpeg"});
+  el('photo-info').textContent='本次拍摄';
   const link = el("download-shot");
   link.href = lastShotUrl;
   link.download = lastShotFile.name;
@@ -816,6 +828,19 @@ function exportShot(blob) {
     link.click();
     tell("摄影者 · 拍摄", "照片已保存");
   }
+  window.dispatchEvent(new Event('campus-photo-captured'));
+}
+
+function exportNativeShot(photo) {
+  if(lastShotUrl)URL.revokeObjectURL(lastShotUrl);
+  lastShotUrl=null;lastShotFile=photo;
+  el('last-shot').src=photo.preview;
+  el('photo-info').textContent=`原图 ${photo.width} × ${photo.height} · ${(photo.bytes/1048576).toFixed(1)} MB`;
+  el('export').hidden=false;
+  el('export').dataset.capture='native';
+  el('share-shot').hidden=false;el('share-shot').textContent='分享照片';
+  el('download-shot').href='#';el('download-shot').textContent='保存原图到相册';
+  tell('拍摄','照片已生成，请保存原图');
   window.dispatchEvent(new Event('campus-photo-captured'));
 }
 el("share-shot").onclick = async () => {
@@ -843,9 +868,20 @@ el("download-shot").onclick = async event => {
 
 el("shutter").onclick = async () => {
   const freeCapture=poseBudget.done || (phoneCamera && !!source && !reference);
-  if ((!latest?.ready && !freeCapture) || shotRequested || !source) return;
+  if ((!latest?.ready && !freeCapture) || shotRequested || nativeCapturing || !source) return;
   if (nativeAndroid && !isDemo() && !freeCapture && performance.now()-latestCapturedAt > 3500) {
     display(null); tell("相机", "等待新的取景画面", "search");
+    return;
+  }
+  if(nativeCameraAvailable && source==='camera') {
+    if(!nativeCamera.active || lens.busy)return;
+    const version=generation;
+    nativeCapturing=true;el('shutter').disabled=true;
+    try {
+      const photo=await nativeCamera.takePhoto();
+      if(version===generation)exportNativeShot(photo);
+    } catch(error){if(version===generation)tell('拍摄',error.message || '拍照失败，请重试','error');}
+    finally {nativeCapturing=false;el('shutter').disabled=!latest?.ready;syncPhone();}
     return;
   }
   shotRequested = snapshot(Infinity);
@@ -913,22 +949,22 @@ if (nativeAndroid) setInterval(() => {
   if (source !== "camera" || document.hidden) return;
   const now = performance.now();
   const quality = video.getVideoPlaybackQuality?.();
-  const frames = video.requestVideoFrameCallback ? measuredFrames : quality ? quality.totalVideoFrames-quality.droppedVideoFrames : null;
+  const frames = nativeCameraAvailable ? null : video.requestVideoFrameCallback ? measuredFrames : quality ? quality.totalVideoFrames-quality.droppedVideoFrames : null;
   const fps = frames === null || lastMeasuredFrames === null ? null : Math.max(0,(frames-lastMeasuredFrames)*1000/Math.max(1,now-lastPreviewMeasure));
   lastMeasuredFrames = frames || 0;
   lastPreviewMeasure = now;
-  el("preview-status").textContent = (fps === null ? "本地预览" : "预览约 " + Math.round(fps) + " 帧/秒") +
+  el("preview-status").textContent = (nativeCameraAvailable ? '原生相机预览' : fps === null ? "本地预览" : "预览约 " + Math.round(fps) + " 帧/秒") +
     (isDemo() ? " · 演示模式 · 手动确认" : analysisPaused ? " · 识别已暂停" : " · 识别最多每秒一次");
   window.__guidePerformance = {previewFps:fps,prepareMs,requestMs,serverMs,completedAnalyses,worker:!!sampler.worker,busy,analysisPaused,
     samplingPath,sampleMainMs,sampleWorkerMs,sampleBytes,
     zoomMode:lens.mode,hardwareZoom:lens.hardware,digitalZoom:lens.digital,motionAnchor:sceneMotion.locked,motionSensor:sceneMotion.domain,
-    cameraSettings:stream?.getVideoTracks()[0]?.getSettings(),
+    cameraSettings:stream?.getVideoTracks()[0]?.getSettings(),cameraEngine:nativeCameraAvailable?'camerax':'webview',
     guidesVisible:el("show-guides").checked,overlayPaints,overlayMs,longTaskMs,mode:isDemo()?"demo":"live"};
   const details = el("performance-details");
   details.hidden = false;
   if (details.open) {
     const settings = window.__guidePerformance.cameraSettings || {};
-    el("performance-values").textContent = `相机 ${settings.width || "?"}×${settings.height || "?"} · 设备报告 ${Math.round(settings.frameRate || 0)} 帧/秒\n` +
+    el("performance-values").textContent = (nativeCameraAvailable ? `原生预览 ${settings.width||'?'}×${settings.height||'?'} · 预计成片 ${settings.photoWidth||'?'}×${settings.photoHeight||'?'}\n` : `相机 ${settings.width || "?"}×${settings.height || "?"} · 设备报告 ${Math.round(settings.frameRate || 0)} 帧/秒\n`) +
       `最近一次取样 ${Math.round(prepareMs)} ms（前端准备 ${Math.round(sampleMainMs)} ms，后台处理 ${Math.round(sampleWorkerMs)} ms）\n` +
       `请求往返 ${Math.round(requestMs)} ms · 电脑处理 ${Math.round(serverMs)} ms · 图片 ${(sampleBytes/1024).toFixed(0)} KB\n` +
       `处理路径 ${samplingPath} · 本秒界面长任务 ${Math.round(longTaskMs)} ms\n` +
@@ -963,7 +999,7 @@ setInterval(() => {
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {cancelOverlay(); cancelCameraOpening(); framingSequence.cancelZoom();lens.cancel();glass.clear();pendingFramingZoom=null;invalidate(undefined, null, true);}
   else if (source === "camera" && stream && cameraOpening === null) {
-    video.play().catch(() => tell("相机", "预览已暂停，请关闭后重新开启相机", "search"));
+    if(!nativeCameraAvailable)video.play().catch(() => tell("相机", "预览已暂停，请关闭后重新开启相机", "search"));
     renderOverlay();
   }
 });
@@ -978,6 +1014,15 @@ phone=setupPhone({startCamera,search:()=>cancelLibrarySelection.recommend(),chan
   referenceVersion++;document.body.dataset.reference='empty';invalidate();syncPhone();
 }});
 syncPhone();
+window.addEventListener('campus-native-camera-state',({detail})=>{
+  if(source!=='camera')return;
+  if(detail.error){stopTracks();showSource(null);tell('相机',detail.error,'error');}
+  else if(detail.active){
+    if(detail.binding!==nativeBinding){nativeBinding=detail.binding;lens.refreshNative();}
+    layout();syncPhone();
+  }
+  else el('shutter').disabled=true;
+});
 window.addEventListener('orientationchange',()=>{
   if(phoneCamera && referenceFile)setTimeout(()=>loadReference(referenceFile,undefined,referenceNote),350);
 });
