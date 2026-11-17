@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="theme-color" content="#172923"><title>校园人像导拍</title><link rel="stylesheet" href="./static/style.css">
+  <meta name="theme-color" content="#172923"><title>校园人像导拍</title><link rel="stylesheet" href="./static/style.css"><link rel="stylesheet" href="./static/mobile-ui.css">
   <script type="module" src="./static/camera.js"></script>
 </head>
 <body data-reference="empty">
@@ -16,7 +16,7 @@
         <form id="library-search">
           <label>拍摄地点<select id="library-location"><option value="">全部地点</option></select></label>
           <label class="query-field">想拍什么<input id="library-query" maxlength="256" placeholder="例如：钟楼、桥头平台、红椅"></label>
-          <button type="submit">筛选图库</button><button id="recommend" type="button">AI 推荐 3 张</button>
+          <button type="submit">筛选图库</button><button id="recommend" type="button">AI 推荐 5 张</button>
         </form>
         <details class="library-options"><summary>推荐条件</summary><div class="library-filters">
           <label>人数<select id="filter-people"><option value="">不限</option><option value="1">单人</option><option value="2">双人</option></select></label>
@@ -46,7 +46,7 @@
           </div>
         </div>
         <div class="feedback"><div class="indicator" id="indicator"></div>
-          <div class="guidance-text" role="status"><div id="who">准备</div><h2 id="hint">从图库选一张参考照，或打开本地照片</h2></div>
+          <div class="guidance-text" role="status"><div id="who">准备</div><h2 id="hint">从图库选一张参考照，或打开本地照片</h2><span id="pose-count" hidden></span></div>
           <button id="skip-stage" type="button" hidden>跳过对准</button>
           <progress id="hold" max="1" value="0" aria-label="稳定进度" hidden></progress>
         </div>

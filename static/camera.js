@@ -2,7 +2,7 @@ import {drawReference, drawGuide} from "./overlay.js";
 import {onDevice, openGuide, analyzeFrame, releaseGuide} from "./transport.js";
 import {setupLibrary} from "./library.js";
 import {AimMotion} from "./aim.js";
-import {HintPacer} from "./hints.js";
+import {HintPacer, conciseHint, PoseBudget} from "./hints.js";
 import {FramingSequence} from "./framing.js";
 import {nativeAndroid, saveNativePhoto, shareNativePhoto} from "./native-export.js";
 import {FrameSampler} from "./frame-sampler.js";
@@ -10,6 +10,8 @@ import {DemoMarker} from "./demo.js";
 import {SceneMotion} from "./scene-motion.js";
 import {CameraZoom} from "./camera-zoom.js";
 import {FramingGlass} from "./framing-glass.js";
+import {phoneCamera, setupPhone} from './mobile-ui.js';
+import {encodeBlob} from './native-server.js';
 
 const el = id => document.getElementById(id);
 const video = el("video"), livePhoto = el("live-photo"), refPhoto = el("reference");
@@ -49,6 +51,8 @@ let mirrorFrames = 0, autoFlippedSource = -1;
 let referenceNote = "";
 const aim = new AimMotion();
 const hints = new HintPacer();
+const poseBudget = new PoseBudget();
+let phone = {sync(){},closeSheets(){},setPhase(){}};
 const framingSequence = new FramingSequence();
 let paintedFramingPhase = "idle";
 const completed = new Set();
@@ -146,10 +150,21 @@ function renderZoom() {
   video.style.transform = lens.digital === 1 ? "" : "scale(" + lens.digital + ")";
   livePhoto.style.transform = "scale(" + cameraZoom + ")";
   sceneMotion.configure(surface.clientWidth || 1,surface.clientHeight || 1,video.videoWidth,video.videoHeight,
-    reference ? reference.width/reference.height : (video.videoWidth/video.videoHeight || 4/3),
+    captureAspect(),
     lens.hardware*lens.digital,facing === "user",reference?.centerTolerance || .08);
   const name = {camera:"相机取景", photo:"照片试拍"}[source] || "尚未取景";
   el("source-state").textContent = cameraZoom === 1 ? name : name + " · " + cameraZoom.toFixed(2) + "×";
+  syncPhone();
+}
+
+function syncPhone() {
+  phone.sync({source,stage:shownStage,zoom:cameraZoom,min:lens.min,max:lens.max,reference,poseRound:poseBudget.round,poseDone:poseBudget.done});
+  if(phoneCamera && source && !reference) el('shutter').disabled=false;
+}
+
+function captureAspect() {
+  if(phoneCamera) return el('viewport').clientWidth/Math.max(1,el('viewport').clientHeight);
+  return reference ? reference.width/reference.height : video.videoWidth/video.videoHeight || 3/4;
 }
 
 function updateFraming(now = performance.now()) {
@@ -210,9 +225,13 @@ function planZoom(result, capturedZoom, capturedAt) {
 }
 
 function tell(who, message, mode = "", paced = false) {
-  const selected = hints.update({who, message, mode, key:shownStage || "setup"}, performance.now(), {immediate:!paced});
+  const selected = hints.update({who, message:conciseHint(message,shownStage), mode, key:shownStage || "setup"}, performance.now(), {immediate:!paced});
+  applyHint(selected);
+}
+
+function applyHint(selected) {
   if (!selected) return;
-  ({who, message, mode} = selected);
+  const {who, message, mode} = selected;
   el("who").textContent = who;
   if (message !== lastMessage) {
     el("hint").textContent = message;
@@ -235,6 +254,7 @@ function showReferenceGuide() {
 }
 
 function display(result, pendingStage) {
+  if(poseBudget.done && reference && source) result={...result,stage:'ready',ready:true,mode:'ready',message:'可以拍摄了',captureReason:'pose_budget'};
   latest = result;
   if (result?.completed) {
     completed.clear();
@@ -284,13 +304,14 @@ function display(result, pendingStage) {
   el("current-label").textContent = background ? "镜头中心" : standing ? "当前人物" : "实时关节";
   el("current-key").hidden = !(aiming || standing && result?.selected ||
     posing && result?.pose?.actual.some(Boolean));
-  el("zoom-controls").hidden = !framing || !source;
+  el("zoom-controls").hidden = !source || (!phoneCamera && !framing);
   el("scene-thumb").hidden = !background || result?.mode === "hold";
   updateDemoUI();
   if (result) {
     const adjustingScale = framing && ["coverage", "steady", "scale"].includes(result.background?.control);
     tell(adjustingScale ? "摄影者 · 匹配景别" : actors[index], result.message, result.mode, true);
   }
+  syncPhone();
 }
 
 function demoFrame(stage) {
@@ -341,6 +362,7 @@ function invalidate(stage, tap = null, preserveFraming = false) {
   if (!preserve) {
     completed.clear(); hints.reset(); demoMarker.reset(); demoZoomPlayed = false;
     sceneMotion.reset();glass.clear();framingGlassPlayed=false;lastFrameBlob=null;
+    poseBudget.reset();
   }
   if (!preserve || !preserveFraming) pendingFramingZoom=null;
   guideContext = context;
@@ -385,10 +407,11 @@ function layout() {
   const ratio = refPhoto.naturalWidth / refPhoto.naturalHeight;
   if (ratio) fit(refSurface, el("ref-box"), ratio);
   const sourceRatio = source === "camera" ? video.videoWidth / video.videoHeight : livePhoto.naturalWidth / livePhoto.naturalHeight;
-  fit(surface, el("viewport"), ratio || sourceRatio || 4/3);
+  if(phoneCamera) {surface.style.width=el('viewport').clientWidth+'px';surface.style.height=el('viewport').clientHeight+'px';}
+  else fit(surface, el("viewport"), ratio || sourceRatio || 4/3);
   demoMarker.configure(surface.clientWidth || 1,surface.clientHeight || 1,ratio || sourceRatio || 4/3,facing === "user");
   sceneMotion.configure(surface.clientWidth || 1,surface.clientHeight || 1,video.videoWidth,video.videoHeight,
-    ratio || sourceRatio || 4/3,lens.hardware*lens.digital,facing === "user",reference?.centerTolerance || .08);
+    captureAspect(),lens.hardware*lens.digital,facing === "user",reference?.centerTolerance || .08);
   showReferenceGuide();
   renderOverlay();
 }
@@ -411,6 +434,7 @@ function promptForInput() {
 }
 
 async function loadReference(file, tap, note) {
+  window.dispatchEvent(new Event('campus-reference-loading'));
   cancelCameraOpening();
   const version = ++referenceVersion;
   const newPhoto = file !== referenceFile;
@@ -454,6 +478,7 @@ async function loadReference(file, tap, note) {
     form.append("reference", file);
     form.append("mirror", refMirrored ? "1" : "0");
     form.append("viewpoint", referenceNote);
+    if(phoneCamera) form.append('aspect',String(captureAspect()));
     if (refTap) {form.append("x", refTap[0]); form.append("y", refTap[1]);}
     const data = await openGuide(form, refPhoto, message => {
       if (version === referenceVersion) tell("参考照", message);
@@ -464,16 +489,26 @@ async function loadReference(file, tap, note) {
     }
     session = data.id;
     reference = data.reference;
+    if(reference.preview) {
+      refPhoto.src=el('scene-thumb').src=reference.preview;
+      refPhoto.style.transform=el('scene-thumb').style.transform='';
+      await refPhoto.decode();
+      if(version!==referenceVersion)return;
+    }
     aim.reset(reference.width/reference.height);
     document.body.dataset.reference = "loaded";
     el("viewpoint").textContent = reference.viewpoint;
     layout();
     promptForInput();
+    window.dispatchEvent(new Event('campus-reference-ready'));
+    return true;
   } catch (error) {
     if (version === referenceVersion) {
       document.body.dataset.reference = "empty";
       tell("参考照", error.name === "EncodingError" ? "无法打开参考照，请使用 JPG、PNG 或 WebP" : error.message, "search");
+      window.dispatchEvent(new Event('campus-reference-error'));
     }
+    return {error:error.name === "EncodingError" ? "无法打开参考照，请使用 JPG、PNG 或 WebP" : error.message};
   } finally {
     if (version === referenceVersion) mirrorButton.disabled = false;
   }
@@ -513,7 +548,8 @@ el("overlay").onclick = e => {
 };
 
 el("zoom").oninput = e => {
-  if (!reference || !source) return;
+  if (!source) return;
+  if(!reference) {setCameraZoom(Number(e.target.value));return;}
   el("auto-zoom").checked = false;
   demoZoomPlayed = true;
   pendingFramingZoom=null;glass.clear();
@@ -529,7 +565,13 @@ el("auto-zoom").onchange = () => {
   invalidate("framing", null, true);
   tell("摄影者 · 调整景别", isDemo() ? "演示倍率可随时手动调整" : el("auto-zoom").checked ? "将根据新的取景画面自动匹配倍率" : "已切换为手动调整倍率");
 };
-const cancelLibrarySelection = setupLibrary((file, note) => loadReference(file, undefined, note), onDevice);
+const cancelLibrarySelection = setupLibrary((file, note) => loadReference(file, undefined, note), onDevice, async()=>{
+  if(!source) await startCamera();
+  if(source!=='camera' || video.readyState<2) throw new Error('请先开启相机，朝向要拍摄的场景');
+  const prepared=await sampler.capture(video,captureAspect(),lens.digital);
+  if(!prepared?.blob) throw new Error('画面正在准备，请再试一次');
+  return prepared.base64 || encodeBlob(prepared.blob);
+});
 window.addEventListener("campus-server-changed", () => {
   if (networkPaused) setAnalysisPaused(false);
   if (referenceFile) loadReference(referenceFile, undefined, referenceNote);
@@ -652,7 +694,7 @@ el("live-file").onchange = async e => {
 function snapshot(maxEdge, reusable = null) {
   const input = source === "camera" ? video : livePhoto;
   const w = input.videoWidth || input.naturalWidth, h = input.videoHeight || input.naturalHeight;
-  const ratio = reference.width / reference.height;
+  const ratio = captureAspect();
   const zoom = source === "camera" ? lens.digital : cameraZoom;
   const cw = Math.min(w, h * ratio) / zoom, ch = cw / ratio;
   const scale = Math.min(1, maxEdge / Math.max(cw, ch));
@@ -679,7 +721,8 @@ function sampledShot(frozen) {
 }
 
 async function analyze() {
-  if (isDemo() || busy || !session || !source || document.hidden || analysisPaused) return;
+  if (isDemo() || poseBudget.done || busy || !session || !source || document.hidden || analysisPaused) return;
+  if(phoneCamera && document.body.dataset.phonePhase!=='guide') return;
   if (nativeAndroid && !shotRequested && !pendingTap && performance.now() < nextAnalysisAt) return;
   if (updateFraming().blockAnalysis || lens.busy) return;
   if (!shotRequested && source === "camera" && (video.readyState < 2 || video.currentTime === lastVideoTime)) return;
@@ -695,7 +738,7 @@ async function analyze() {
   try {
     // 快门请求分析和下载使用同一次采样，辅助线画在独立的 canvas 上。
     const prepared = nativeAndroid && source === "camera" && !taking
-      ? await sampler.capture(video, reference.width/reference.height, lens.digital) : null;
+      ? await sampler.capture(video, captureAspect(), lens.digital) : null;
     const blob = prepared?.blob || await jpeg(taking && nativeAndroid ? sampledShot(taking)
       : taking || snapshot(nativeAndroid ? 640 : 960, analysisCanvas), nativeAndroid ? .75 : taking ? .94 : .9);
     prepareMs = performance.now()-lastAnalysisStarted;
@@ -773,6 +816,7 @@ function exportShot(blob) {
     link.click();
     tell("摄影者 · 拍摄", "照片已保存");
   }
+  window.dispatchEvent(new Event('campus-photo-captured'));
 }
 el("share-shot").onclick = async () => {
   try {
@@ -798,20 +842,21 @@ el("download-shot").onclick = async event => {
 };
 
 el("shutter").onclick = async () => {
-  if (!latest?.ready || shotRequested) return;
-  if (nativeAndroid && !isDemo() && performance.now()-latestCapturedAt > 3500) {
+  const freeCapture=poseBudget.done || (phoneCamera && !!source && !reference);
+  if ((!latest?.ready && !freeCapture) || shotRequested || !source) return;
+  if (nativeAndroid && !isDemo() && !freeCapture && performance.now()-latestCapturedAt > 3500) {
     display(null); tell("相机", "等待新的取景画面", "search");
     return;
   }
   shotRequested = snapshot(Infinity);
   el("shutter").disabled = true;
-  if (isDemo()) {
+  if (isDemo() || freeCapture) {
     const version = generation, frozen = shotRequested;
     try {
       const blob = await jpeg(frozen,.94);
       if (version === generation) exportShot(blob);
     } catch (error) {if (version === generation) tell("拍摄",error.message,"error");}
-    finally {if (version === generation) {shotRequested=false;el("shutter").disabled=!latest?.ready;}}
+    finally {if (version === generation) {shotRequested=false;el("shutter").disabled=!latest?.ready && !freeCapture;}}
     return;
   }
   analyze();
@@ -894,6 +939,14 @@ if (nativeAndroid) setInterval(() => {
 }, 1000);
 
 setInterval(() => {
+  const now=performance.now();
+  applyHint(hints.flush(now));
+  const poseActive=shownStage==='pose' && hints.current?.key==='pose' && !!source && !analysisPaused && !document.hidden;
+  const wasDone=poseBudget.done;
+  poseBudget.tick(now,poseActive);
+  if(!wasDone && poseBudget.done) {generation++;display(latest);tell('拍摄','可以拍摄了','ready');}
+  if(shownStage==='pose') syncPhone();
+  if(poseBudget.done)return;
   if (isDemo()) return;
   // Expire the previous result even while the next request is still running.
   // A response received recently may itself describe an old camera frame.
@@ -916,4 +969,16 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("pagehide", () => {sceneMotion.dispose();glass.clear();demoMarker.dispose();cancelOverlay(); sampler.dispose(); cancelCameraOpening(); releaseGuide(session); stopTracks();});
 window.addEventListener("pageshow", e => {if (e.persisted) location.reload();});
+
+phone=setupPhone({startCamera,search:()=>cancelLibrarySelection.recommend(),changeZoom:value=>{
+  el('zoom').value=String(Math.max(lens.min,Math.min(lens.max,value)));
+  el('zoom').dispatchEvent(new Event('input',{bubbles:true}));
+},rechoose:()=>{
+  cancelLibrarySelection();releaseGuide(session);session=null;reference=null;referenceFile=null;
+  referenceVersion++;document.body.dataset.reference='empty';invalidate();syncPhone();
+}});
+syncPhone();
+window.addEventListener('orientationchange',()=>{
+  if(phoneCamera && referenceFile)setTimeout(()=>loadReference(referenceFile,undefined,referenceNote),350);
+});
 

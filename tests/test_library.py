@@ -90,6 +90,19 @@ def test_gallery_thumbnail_is_small_oriented_and_preserves_original(client, tmp_
     assert client.get("/api/library/missing/thumbnail").status_code == 404
 
 
+def test_scene_recommendation_forwards_snapshot_and_five_card_limit(client, monkeypatch):
+    payload = {"query": "自然校园", "limit": 5, "scene_image": "a" * 80}
+    def upstream(request, timeout):
+        assert request.full_url.endswith("/recommend-scene")
+        assert json.loads(request.data) == payload
+        return io.BytesIO(json.dumps({"scene_used": True, "recommendations": [
+            {"photo_id": "tower_01", "aesthetic_score": 6.3}]}).encode())
+    monkeypatch.setattr(library, "urlopen", upstream)
+    response = client.post("/api/recommend", json=payload)
+    assert response.status_code == 200 and response.json["scene_used"]
+    assert response.json["recommendations"][0]["aesthetic_score"] == 6.3
+
+
 def test_thumbnail_never_enlarges_a_small_image(client):
     with Image.open(io.BytesIO(client.get("/api/library/tower_01/thumbnail").data)) as thumb:
         assert thumb.size == (100, 150)
@@ -102,7 +115,7 @@ def test_upstream_failure_is_not_reported_as_an_ai_recommendation(client, monkey
     response = client.post("/api/recommend", json={"query": "钟楼"})
     assert response.status_code == 503 and response.json["reason"] == "upstream_unavailable"
     assert "recommendations" not in response.json
-    for bad in ({"limit": True}, {"limit": 4}, {"person_count": "1"}, {"query": ["tower"]}, {"url": "http://localhost"}):
+    for bad in ({"limit": True}, {"limit": 6}, {"person_count": "1"}, {"query": ["tower"]}, {"url": "http://localhost"}):
         assert client.post("/api/recommend", json=bad).status_code == 400
 
 

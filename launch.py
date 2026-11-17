@@ -64,14 +64,14 @@ def print_connection_info(host, port):
         print(f"  http://{address}:{port}", flush=True)
     if not addresses:
         print(f"  未找到局域网 IPv4，请用 ipconfig 查看 Wi-Fi 地址，填写 http://电脑IP:{port}", flush=True)
-    print("在 APP 顶部的电脑服务连接栏填写以上地址；请核对正在使用的 Wi-Fi/热点网卡。", flush=True)
+    print("在 APP 左上角设置中的电脑服务连接栏填写以上地址；请核对正在使用的 Wi-Fi/热点网卡。", flush=True)
     print("手机与电脑连接同一 Wi-Fi，或让电脑连接手机热点。电脑须保持开机，勿关闭本窗口。", flush=True)
-    print("如 Windows 防火墙询问，仅按需允许 Python 访问专用网络；无需开放推荐服务的 8000 端口。\n", flush=True)
+    print("如 Windows 防火墙询问，仅按需允许 Python 访问专用网络；无需开放推荐服务的 8001 端口。\n", flush=True)
 
 
 def launch_recommendation():
-    url = os.environ.get("PHOTO_RECOMMEND_URL", "http://127.0.0.1:8000").rstrip("/")
-    if url != "http://127.0.0.1:8000":
+    url = os.environ.get("PHOTO_RECOMMEND_URL", "http://127.0.0.1:8001").rstrip("/")
+    if url != "http://127.0.0.1:8001":
         return None, None
     try:
         with urlopen(url + "/health", timeout=1) as response:
@@ -88,11 +88,12 @@ def launch_recommendation():
     logs.mkdir(parents=True, exist_ok=True)
     log = (logs / "recommend.log").open("a", encoding="utf-8")
     env = dict(os.environ, PYTHONUTF8="1")
+    env["PYTHONPATH"] = str(project) + os.pathsep + env.get("PYTHONPATH", "")
     env.setdefault("OMP_NUM_THREADS", "4")
     env.setdefault("MKL_NUM_THREADS", "4")
     env.setdefault("PHOTO_RECOMMEND_CATALOG", str(project / "data/formal/catalog.json"))
-    process = subprocess.Popen([str(python), "-m", "uvicorn", "photo_recommend.api:app", "--host", "127.0.0.1", "--port", "8000"],
-                               cwd=project, env=env, stdout=log, stderr=log,
+    process = subprocess.Popen([str(python), "-m", "uvicorn", "scene_recommend:app", "--host", "127.0.0.1", "--port", "8001"],
+                               cwd=ROOT, env=env, stdout=log, stderr=log,
                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     print("推荐服务正在启动，日志：" + str(logs / "recommend.log"), flush=True)
     return process, log

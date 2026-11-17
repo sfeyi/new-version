@@ -1,5 +1,6 @@
 import {nativeAndroid} from "./native-export.js";
 import {getServerBase, serverRequest, serverBlob} from "./native-server.js";
+import {phoneCamera} from './mobile-ui.js';
 
 const el = id => document.getElementById(id);
 const fields = ["location_id", "person_count", "framing", "pose"];
@@ -19,14 +20,16 @@ function textScore(photo, query) {
   return terms.reduce((sum, term) => sum + (term && text.includes(term) ? term.length : 0), 0);
 }
 
-export function setupLibrary(selectReference, onDevice) {
+export function setupLibrary(selectReference, onDevice, captureScene = null) {
   let base = nativeAndroid ? getServerBase() : new URL("../", import.meta.url).href;
   let photos = [], revision = 0;
   let renderVersion = 0, loadingImages = 0, imageQueue = [];
   let cameraActive = false;
+  let connecting = null;
   const imageUrls = new Set();
   const panel = el("library-panel"), status = el("library-status");
   const setStatus = text => {status.textContent = text;};
+  const imagesAllowed = () => !cameraActive || (phoneCamera && ['discover','choosing'].includes(document.body.dataset.phonePhase));
   if (nativeAndroid) el("library-connection").hidden = true;
   if (onDevice && !nativeAndroid) {
     try {base = localStorage.getItem("campus-library-server") || "";} catch {base = "";}
@@ -35,7 +38,7 @@ export function setupLibrary(selectReference, onDevice) {
   }
 
   function params() {
-    const data = {query:el("library-query").value.trim(), limit:3};
+    const data = {query:el("library-query").value.trim(), limit:5};
     for (const [id, key] of [["library-location", "location_id"], ["filter-people", "person_count"],
                             ["filter-framing", "framing"], ["filter-pose", "pose"]]) {
       const value = el(id).value;
@@ -63,14 +66,14 @@ export function setupLibrary(selectReference, onDevice) {
 
   function loadImages() {
     // Camera preview takes priority over background gallery traffic and image decoding.
-    while (!cameraActive && loadingImages < 1 && imageQueue.length) {
+    while (imagesAllowed() && loadingImages < 1 && imageQueue.length) {
       const item = imageQueue.shift();
       const {img, path, server, version} = item;
       if (version !== renderVersion) continue;
       loadingImages++;
-      serverBlob(path, server, () => !cameraActive && version === renderVersion).then(blob => {
+      serverBlob(path, server, () => imagesAllowed() && version === renderVersion).then(blob => {
         if (version !== renderVersion || !img.isConnected) return;
-        if (!blob || cameraActive) {imageQueue.unshift(item); return;}
+        if (!blob || !imagesAllowed()) {imageQueue.unshift(item); return;}
         const url = URL.createObjectURL(blob);
         imageUrls.add(url);
         img.src = url;
@@ -81,10 +84,28 @@ export function setupLibrary(selectReference, onDevice) {
   }
 
   function render(rows) {
+    if (phoneCamera) rows=rows.slice(0,5);
     clearImages();
     const container = el("library-results");
     container.replaceChildren();
     const displayBase = base;
+    let selected=null, selecting=false;
+    const currentRender=renderVersion;
+    const focus=button=>{
+      if (!button || selected===button) return;
+      selected=button;
+      container.querySelectorAll('.photo-card').forEach(card=>card.classList.toggle('is-current',card===button));
+      if(el('use-reference'))el('use-reference').disabled=selecting;
+    };
+    if(phoneCamera && el('use-reference')) {
+      el('use-reference').disabled=true;
+      el('use-reference').onclick=()=>selected?.choosePhoto();
+    }
+    if(phoneCamera) container.onscroll=()=>{
+      const middle=container.scrollLeft+container.clientWidth/2;
+      const cards=[...container.querySelectorAll('.photo-card')];
+      focus(cards.sort((a,b)=>Math.abs(a.offsetLeft+a.offsetWidth/2-middle)-Math.abs(b.offsetLeft+b.offsetWidth/2-middle))[0]);
+    };
     let offset = 0;
     const more = document.createElement("button");
     more.type = "button";
@@ -104,12 +125,15 @@ export function setupLibrary(selectReference, onDevice) {
         else img.src = new URL(photo.thumbnail_url || photo.image_url, displayBase).href;
         const caption = document.createElement("span");
         const title = document.createElement("strong");
-        title.textContent = photo.photo_id + " · " + photo.location;
+        title.textContent = phoneCamera ? photo.location : photo.photo_id + " · " + photo.location;
         const description = document.createElement("span");
-        description.textContent = (photo.viewpoint_group || photo.description || "选作参考照").replaceAll("_", " / ");
+        description.textContent = phoneCamera && Number.isFinite(photo.aesthetic_score) ? '美学 '+photo.aesthetic_score.toFixed(1)+' / 10' : (photo.viewpoint_group || photo.description || "选作参考照").replaceAll("_", " / ");
         caption.append(title, description);
         button.append(img, caption);
-        button.onclick = async () => {
+        button.choosePhoto = async () => {
+          if(selecting)return;
+          selecting=true;
+          if(phoneCamera)el('use-reference').disabled=true;
           const token = ++revision;
           button.disabled = true;
           setStatus("正在打开 " + photo.photo_id);
@@ -128,13 +152,19 @@ export function setupLibrary(selectReference, onDevice) {
             const suffix = {"image/webp":"webp", "image/png":"png"}[blob.type] || "jpg";
             const file = new File([blob], photo.photo_id + "." + suffix, {type:blob.type});
             panel.open = false;
-            await selectReference(file, photo.viewpoint || "");
+            const outcome=await selectReference(file, photo.viewpoint || "");
+            if(outcome?.error)throw new Error(outcome.error);
             if (token === revision) setStatus("已选择 " + photo.photo_id + "，可继续挑选其他参考照");
           } catch (error) {
             if (token === revision) setStatus(error.message || "读取照片失败，请重试");
-          } finally {button.disabled = false;}
+          } finally {
+            selecting=false;button.disabled=false;
+            if(phoneCamera && currentRender===renderVersion)el('use-reference').disabled=!selected;
+          }
         };
+        button.onclick=phoneCamera ? ()=>{focus(button);button.scrollIntoView({behavior:matchMedia('(prefers-reduced-motion:reduce)').matches?'instant':'smooth',block:'nearest',inline:'center'});} : button.choosePhoto;
         container.append(button);
+        if(phoneCamera && !selected)focus(button);
       }
       offset += 12;
       if (offset < rows.length) container.append(more);
@@ -142,6 +172,11 @@ export function setupLibrary(selectReference, onDevice) {
     };
     more.onclick = append;
     append();
+    if(phoneCamera) {
+      container.scrollLeft=0;
+      window.dispatchEvent(new CustomEvent('campus-recommendations',{detail:{count:rows.length}}));
+      loadImages();
+    }
   }
 
   function browse() {
@@ -169,7 +204,8 @@ export function setupLibrary(selectReference, onDevice) {
       for (const location of data.locations) select.add(new Option(location.name, location.id));
       el("library-count").textContent = "· " + data.count + " 张";
       if (onDevice && !nativeAndroid) {try {localStorage.setItem("campus-library-server", base);} catch {}}
-      browse();
+      if(phoneCamera) setStatus('输入风格，寻找适合当前场景的参考照');
+      else browse();
     } catch (error) {
       if (token === revision) setStatus(error instanceof TypeError ? "无法连接图库，请检查服务地址；也可以直接打开参考照" : error.message);
     }
@@ -188,22 +224,29 @@ export function setupLibrary(selectReference, onDevice) {
       connect();
     } catch (error) {setStatus(error.message);}
   };
-  el("recommend").onclick = async () => {
+  const recommend = async () => {
+    // An automatic search after connecting waits for catalog initialization.
+    await connecting;
     const token = ++revision;
     el("recommend").disabled = true;
-    setStatus("正在检索参考照，请稍候");
+    setStatus("正在挑选参考照，首次加载可能稍久");
     try {
-      const data = await json("api/recommend", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(params())});
+      const payload=params();
+      if(phoneCamera && captureScene)payload.scene_image=await captureScene();
+      if(token!==revision)return;
+      const data = await json("api/recommend", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)});
       if (token !== revision) return;
+      if(payload.scene_image && !data.scene_used) throw new Error('请更新并重启电脑服务，以使用场景检索');
       render(data.recommendations);
       const reason = {no_confirmed_matches:"没有满足条件的已确认照片，可减少筛选条件", features_unavailable:"推荐特征尚未准备，可先筛选图库"};
-      setStatus(data.recommendations.length ? "AI 推荐 · " + data.recommendations.length + " 张，点照片开始导拍" :
+      setStatus(data.recommendations.length ? (phoneCamera ? '场景与风格匹配 · 按美学优选' : "AI 推荐 · " + data.recommendations.length + " 张，点照片开始导拍") :
         reason[data.reason] || (data.missing_images?.length ? "推荐照片不在当前图库，请核对两端图库版本" : "暂无推荐照片"));
     } catch (error) {
       if (token === revision) setStatus(error instanceof TypeError ? "连接推荐服务失败，可先筛选图库" : error.message);
     } finally {el("recommend").disabled = false;}
   };
-  const changeServer = () => {base = getServerBase(); connect();};
+  el("recommend").onclick=recommend;
+  const changeServer = () => {base = getServerBase(); connecting=connect();};
   const cameraActivity = ({detail}) => {
     cameraActive = !!detail.active;
     if (cameraActive) panel.open = false;
@@ -211,13 +254,15 @@ export function setupLibrary(selectReference, onDevice) {
   };
   if (nativeAndroid) window.addEventListener("campus-server-changed", changeServer);
   if (nativeAndroid) window.addEventListener("campus-camera-activity", cameraActivity);
-  if (base) connect();
-  else setStatus(nativeAndroid ? "请先在页面顶部连接电脑，再选择参考照" : "连接图库服务后可以检索参考照，也可以直接从相册打开照片");
+  if (base) connecting=connect();
+  else setStatus(nativeAndroid ? "先点左上角设置，连接电脑" : "连接图库服务后可以检索参考照，也可以直接从相册打开照片");
   window.addEventListener("pagehide", () => {
     clearImages();
     window.removeEventListener("campus-server-changed", changeServer);
     window.removeEventListener("campus-camera-activity", cameraActivity);
   }, {once:true});
   // The camera calls this when choosing a local file; it cancels selection, not the library UI.
-  return () => {++revision;};
+  const cancel=() => {++revision;};
+  cancel.recommend=recommend;
+  return cancel;
 }

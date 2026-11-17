@@ -85,15 +85,17 @@ def public(photo):
 def options(data):
     if not isinstance(data, dict):
         raise ValueError("请提供检索条件")
-    allowed = {*FILTERS, "query", "limit", "aesthetic_weight", "required_objects", "forbidden_poses"}
+    allowed = {*FILTERS, "query", "limit", "aesthetic_weight", "required_objects", "forbidden_poses", "scene_image"}
     if set(data) - allowed:
         raise ValueError("检索条件包含未知字段")
     for key in ("query", "location_id", "framing", "pose"):
         if key in data and (not isinstance(data[key], str) or len(data[key]) > (256 if key == "query" else 100)):
             raise ValueError("检索条件格式不正确")
     for key in ("person_count", "limit"):
-        if key in data and (type(data[key]) is not int or not (0 <= data[key] <= 100 if key == "person_count" else 1 <= data[key] <= 3)):
+        if key in data and (type(data[key]) is not int or not (0 <= data[key] <= 100 if key == "person_count" else 1 <= data[key] <= 5)):
             raise ValueError("人数或推荐数量无效")
+    if "scene_image" in data and (not isinstance(data["scene_image"], str) or not 40 <= len(data["scene_image"]) <= 1_400_000):
+        raise ValueError("当前画面格式或大小不正确")
     if "aesthetic_weight" in data and (type(data["aesthetic_weight"]) not in (int, float) or not 0 <= data["aesthetic_weight"] <= 1):
         raise ValueError("美学权重应为 0 到 1")
     for key in ("required_objects", "forbidden_poses"):
@@ -146,11 +148,11 @@ def thumbnail(photo_id):
 @api.post("/api/recommend")
 def recommend():
     payload = options(request.get_json(silent=True))
-    base = os.environ.get("PHOTO_RECOMMEND_URL", "http://127.0.0.1:8000").rstrip("/")
+    base = os.environ.get("PHOTO_RECOMMEND_URL", "http://127.0.0.1:8001").rstrip("/")
     if urlparse(base).scheme not in {"http", "https"}:
         return jsonify(error="推荐服务地址配置无效"), 503
     try:
-        call = Request(base + "/recommend", data=json.dumps(payload, ensure_ascii=False).encode(),
+        call = Request(base + ("/recommend-scene" if payload.get("scene_image") else "/recommend"), data=json.dumps(payload, ensure_ascii=False).encode(),
                        headers={"Content-Type": "application/json"}, method="POST")
         with urlopen(call, timeout=90) as response:
             result = json.loads(response.read(2_000_001))
@@ -163,7 +165,7 @@ def recommend():
         return jsonify(error="推荐服务返回格式不正确"), 502
     photos = library()
     enriched, missing = [], []
-    for item in result["recommendations"][:payload.get("limit", 3)]:
+    for item in result["recommendations"][:payload.get("limit", 5)]:
         if not isinstance(item, dict) or not isinstance(item.get("photo_id"), str):
             return jsonify(error="推荐服务返回照片编号无效"), 502
         photo = photos.get(item["photo_id"])

@@ -17,6 +17,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from guide import Guide
 from people import Models
 from library import api as library_api
+from phone_frame import crop_phone_reference, reference_preview
 
 
 ROOT = Path(__file__).resolve().parent
@@ -110,8 +111,15 @@ def start():
         raise ValueError("参考照方向参数应为 0 或 1。")
     if mirror == "1":
         frame = cv2.flip(frame, 1)
+    phone_aspect = request.form.get("aspect", type=float)
+    if "aspect" in request.form and phone_aspect is None:
+        raise ValueError("手机画幅无效")
+    if phone_aspect is not None:
+        frame = crop_phone_reference(frame, phone_aspect, get_models())
     note = request.form.get("viewpoint", "").strip()[:100] or campus_notes().get(hashlib.sha256(data).hexdigest(), "")
     guide = Guide(get_models(), frame, note, point(request.form))
+    if phone_aspect is not None:
+        guide.reference["preview"] = reference_preview(frame)
     if request.form.get("client") == "android-preview":
         # Low-frequency phone sampling is intentional; a slow fresh pair can still confirm alignment.
         guide.max_sample_gap = 3.5

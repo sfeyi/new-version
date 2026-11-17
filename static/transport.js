@@ -14,7 +14,7 @@ async function json(response) {
 export async function openGuide(form, image, progress) {
   if (nativeAndroid) {
     const base = getServerBase();
-    if (!base) throw new Error("请先在页面顶部连接电脑导拍服务");
+    if (!base) throw new Error("请在左上角设置中连接电脑");
     const entries = [{key:"client", type:"string", value:"android-preview"}];
     for (const [key, value] of form) {
       if (value instanceof Blob) entries.push({key, type:"base64File", value:await encodeBlob(value),

@@ -86,8 +86,6 @@ def main():
             errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.goto(f"http://127.0.0.1:{server.server_port}/")
-            page.locator("#guide-mode").select_option("live")
-            page.locator("#camera").click()
             expect(page.locator("#source-state")).to_have_text("相机取景")
             # Compare both Worker routes to the exact same center-crop geometry.
             result = page.evaluate("""async()=>{
@@ -134,12 +132,15 @@ def main():
             }""")
             report["single_flight_and_disposal"] = True
 
+            page.locator('#phone-settings').click()
             page.locator("#computer-server").fill("http://127.0.0.1:7862")
             page.locator("#computer-connect-button").click()
             expect(page.locator("#computer-status")).to_contain_text("已连接电脑")
+            page.locator('#phone-settings-sheet [data-close]').click()
             photo = io.BytesIO()
             Image.new("RGB", (720,960), (180,90,40)).save(photo,"JPEG")
             page.locator("#ref-file").set_input_files({"name":"reference.jpg","mimeType":"image/jpeg","buffer":photo.getvalue()})
+            expect(page.locator('body')).to_have_attribute('data-reference','loaded')
             expect(page.locator("#shutter")).to_be_enabled(timeout=15000)
             page.evaluate("qa.delay=6000")
             page.wait_for_function("qa.active===1")
@@ -152,6 +153,7 @@ def main():
             assert page.evaluate("qa.peak") == 1
             report["stale_ready_expires_during_request"] = True
             report["slow_request_keeps_preview_running"] = True
+            page.locator('#phone-settings').click()
             page.locator("#performance-details summary").click()
             expect(page.locator("#performance-values")).to_contain_text("video-frame", timeout=3000)
             page.locator("#pause-analysis").click()

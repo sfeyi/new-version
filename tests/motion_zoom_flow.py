@@ -120,13 +120,14 @@ def main():
             page=ctx.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
             page.goto(f'http://127.0.0.1:{server.server_port}/')
             report.update(page.evaluate(CASES))
+            page.locator('#phone-settings').click()
             page.locator('#computer-server').fill('http://127.0.0.1:7862')
             page.locator('#computer-connect-button').click()
             expect(page.locator('#computer-status')).to_contain_text('已连接电脑')
+            page.locator('#phone-settings-sheet [data-close]').click()
             photo=io.BytesIO();Image.new('RGB',(720,960),(120,140,160)).save(photo,'JPEG')
             page.locator('#ref-file').set_input_files({'name':'reference.jpg','mimeType':'image/jpeg','buffer':photo.getvalue()})
             expect(page.locator('body')).to_have_attribute('data-reference','loaded')
-            page.locator('#camera').click()
             expect(page.locator('#live-aim')).to_be_visible(timeout=10000)
             before=page.locator('#live-dot').evaluate('(e)=>e.style.transform')
             page.evaluate('qa.unstable=true')
@@ -163,7 +164,6 @@ def main():
                 page.locator('#ref-file').set_input_files({'name':'reference.jpg','mimeType':'image/jpeg','buffer':photo.getvalue()})
                 expect(page.locator('body')).to_have_attribute('data-reference','loaded')
                 page.evaluate('qa.center=true')
-                page.locator('#camera').click()
                 page.wait_for_function('qa.lensCalls.some(c=>c.zoom>1.05)&&qa.zoom<1.6',timeout=10000)
                 calls=page.evaluate("""action=>{
                     if(action==='auto') {const e=document.querySelector('#auto-zoom');e.checked=false;e.dispatchEvent(new Event('change'));}

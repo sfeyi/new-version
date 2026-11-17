@@ -3,6 +3,18 @@ import {nativeAndroid} from "./native-export.js";
 const key = "campus-photo-computer";
 let base = "";
 export const getServerBase = () => base;
+let connection = {phase:"disconnected", message:"连接电脑后开启推荐与导拍"};
+export const getConnectionState = () => ({...connection});
+function connectionState(phase, message) {
+  if(connection.phase===phase && connection.message===message)return;
+  connection={phase,message};
+  window.dispatchEvent(new CustomEvent('campus-connection-state',{detail:getConnectionState()}));
+}
+
+function unreachable(server) {
+  if(base && server===base) connectionState('unreachable','连接已中断，请检查电脑服务和网络');
+  return Object.assign(new Error("无法连接电脑，请确认服务已启动、手机与电脑在同一网络，并允许防火墙访问"), {code:"SERVER_UNREACHABLE"});
+}
 
 export function normalizeServer(value) {
   let url;
@@ -33,7 +45,7 @@ export async function encodeBlob(blob) {
 }
 
 export async function serverRequest(path, options = {}, server = base) {
-  if (!server) throw new Error("请先在页面顶部连接电脑导拍服务");
+  if (!server) throw new Error("请在左上角设置中连接电脑");
   const http = globalThis.Capacitor?.Plugins?.CapacitorHttp;
   if (!nativeAndroid || !http) throw new Error("手机网络接口不可用，请重新打开 APP");
   const root = new URL(server), target = new URL(path, root);
@@ -45,13 +57,14 @@ export async function serverRequest(path, options = {}, server = base) {
     response = await http.request({method:"GET", connectTimeout:8000, readTimeout:95000,
       responseType:"json", disableRedirects:true, ...options, url:target.href});
   } catch {
-    throw Object.assign(new Error("无法连接电脑，请确认服务已启动、手机与电脑在同一网络，并允许防火墙访问"), {code:"SERVER_UNREACHABLE"});
+    throw unreachable(server);
   }
-  if (!(response.status > 0)) throw Object.assign(new Error("电脑连接已中断"), {code:"SERVER_UNREACHABLE"});
+  if (!(response.status > 0)) throw unreachable(server);
   if (response.status < 200 || response.status >= 300) {
     throw Object.assign(new Error(response.data?.error || "电脑服务返回错误（" + response.status + "），请重试"),
       {status:response.status});
   }
+  if(base && server===base && connection.phase==='unreachable') connectionState('connected','已连接电脑');
   return response;
 }
 
@@ -88,8 +101,11 @@ function setupConnection() {
   try {saved = localStorage.getItem(key) || "";} catch {}
   input.value = saved;
   async function connect() {
+    if(button.disabled)return;
+    const wasConnected=connection.phase==='connected';
     button.disabled = true;
     status.textContent = "正在连接电脑导拍服务…";
+    connectionState('connecting',status.textContent);
     try {
       const next = normalizeServer(input.value);
       const response = await serverRequest("api/health", {readTimeout:8000}, next);
@@ -101,8 +117,12 @@ function setupConnection() {
       try {localStorage.setItem(key, next);} catch {}
       status.textContent = "已连接电脑 · 识别与推荐在电脑运行";
       window.dispatchEvent(new CustomEvent("campus-server-changed", {detail:{base, previous}}));
+      connectionState('connected',status.textContent);
+      window.dispatchEvent(new Event('campus-connection-confirmed'));
     } catch (error) {
-      status.textContent = error.message + (base ? "；当前仍使用之前连接的电脑" : "");
+      const keepPrevious=base && wasConnected && connection.phase!=='unreachable';
+      status.textContent = error.message + (keepPrevious ? "；当前仍使用之前连接的电脑" : "");
+      connectionState(keepPrevious?'connected':'unreachable',status.textContent);
     } finally {button.disabled = false;}
   }
   section.querySelector("form").onsubmit = event => {event.preventDefault(); connect();};
