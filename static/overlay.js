@@ -146,7 +146,7 @@ function framingOutline(d, ref, background, visual) {
   else
     landmarkMarkers(d, ref.landmarks, background?.tracking ? background.anchors : []);
   c.restore();
-  if (visual?.scan != null) {
+  if (visual?.scan != null && !visual.prism) {
     const y = visual.scan*d.h;
     c.save();
     const glow = c.createLinearGradient(0, y-32, 0, y+8);
@@ -305,6 +305,6 @@ export function drawGuide(canvas, result, ref, stage = result?.stage, aim = null
   const d = drawing(canvas);
   if (!d || !ref) return;
   drawStage(d, result, ref, stage, aim, framing);
-  alignedPulse(d, aim?.success);
+  if (!framing?.prism) alignedPulse(d, aim?.success);
 }
 

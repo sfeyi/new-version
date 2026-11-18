@@ -82,6 +82,8 @@ function paintOverlay(now = performance.now()) {
     return;
   }
   const framingVisual = updateFraming(now);
+  glass.sync(framingVisual);
+  framingVisual.prism = glass.active;
   const visual = aim.sample(now);
   if (show && !demoAiming && !motionAiming && reference) {
     const started = performance.now();

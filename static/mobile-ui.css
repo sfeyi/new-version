@@ -11,7 +11,9 @@ html.native-camera-active,body.phone-ui.native-camera-active,.phone-ui.native-ca
 .phone-ui .camera>.controls {display:none}
 .phone-ui #empty,.phone-ui #legend,.phone-ui #scene-thumb {display:none!important}
 .phone-ui #viewport::after {content:"";position:absolute;inset:0;background:linear-gradient(#0008,transparent 20%,transparent 45%,#0006 70%,#000d);pointer-events:none}
-.phone-ui #aim-transition {top:21%;font-size:15px;padding:12px 18px;background:#1a2628c9;border:1px solid #ffffff30;z-index:4}
+.phone-ui #aim-transition {top:calc(var(--phone-top) + 112px);min-width:164px;gap:4px;font-size:13px;padding:10px 16px;background:#172429b3;border:1px solid #ffffff38;border-radius:20px;box-shadow:0 4px 20px #0001;z-index:4}
+.phone-ui #aim-transition strong {color:#fff5dc;font-size:16px}
+.phone-ui #aim-transition span {color:#ffffffc9;font-size:11px}
 .phone-ui #framing-status {display:none!important}
 #phone-top {position:fixed;top:calc(var(--phone-top) + 14px);left:20px;right:20px;display:flex;align-items:center;justify-content:space-between;z-index:8}
 .icon-button {display:grid;place-items:center;width:44px;height:44px;border:1px solid #ffffff28;border-radius:50%;padding:10px;background:#15202266;color:#fff}

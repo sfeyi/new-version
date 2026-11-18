@@ -34,7 +34,29 @@
     <div class="workspace">
       <section class="camera" aria-label="取景和拍摄">
         <div id="viewport">
-          <div id="surface" hidden><video id="video" muted playsinline></video><img id="live-photo" hidden alt="当前试拍画面"><div id="framing-glass" hidden aria-hidden="true"><img id="framing-still" alt=""></div><canvas id="overlay" aria-label="取景引导，可点选主角"></canvas><div id="live-aim" hidden aria-label="参考中心按手机方向跟随"><i class="demo-ring"></i><i id="live-dot"></i></div><div id="demo-aim" hidden aria-label="点按景物放置演示白点"><i class="demo-ring"></i><i id="demo-dot"></i></div></div>
+          <div id="surface" hidden>
+            <video id="video" muted playsinline></video><img id="live-photo" hidden alt="当前试拍画面">
+            <div id="framing-glass" hidden aria-hidden="true">
+              <div class="prism-veil"><img id="framing-still" alt="" hidden></div>
+              <div class="prism-lock"></div>
+              <div class="prism-frame">
+                <div class="prism-haze"></div>
+                <div class="prism-field"><div class="prism-dots"></div></div>
+                <div class="prism-sweep"></div>
+                <svg class="prism-border" viewBox="0 0 100 100" preserveAspectRatio="none">
+                  <defs><linearGradient id="framing-spectrum" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0" stop-color="#ffe5a1"/><stop offset=".26" stop-color="#fff9de"/>
+                    <stop offset=".48" stop-color="#f2baf7"/><stop offset=".72" stop-color="#a7c8ff"/>
+                    <stop offset="1" stop-color="#b6fff0"/>
+                  </linearGradient></defs>
+                  <rect class="prism-bloom" x="1" y="1" width="98" height="98" rx="4"/>
+                  <rect class="prism-hairline" x="1" y="1" width="98" height="98" rx="4"/>
+                  <path class="prism-corners" d="M1 16V5Q1 1 5 1H18M82 1H95Q99 1 99 5V16M99 84V95Q99 99 95 99H82M18 99H5Q1 99 1 95V84"/>
+                </svg>
+              </div>
+            </div>
+            <canvas id="overlay" aria-label="取景引导，可点选主角"></canvas><div id="live-aim" hidden aria-label="参考中心按手机方向跟随"><i class="demo-ring"></i><i id="live-dot"></i></div><div id="demo-aim" hidden aria-label="点按景物放置演示白点"><i class="demo-ring"></i><i id="demo-dot"></i></div>
+          </div>
           <div id="demo-badge" hidden>演示 · 手动确认</div>
           <div id="empty"><span class="empty-frame" aria-hidden="true"></span><p>取景画面</p></div>
           <img id="scene-thumb" hidden alt="参考地标与拍摄方向">
